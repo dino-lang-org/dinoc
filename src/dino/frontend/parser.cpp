@@ -812,9 +812,6 @@ private:
                 consume_optional_terminator();
             } else if (check(TokenType::LBrace)) {
                 c.body = parse_block_stmt();
-            } else if (match(TokenType::KwYield)) {
-                c.body = parse_expression();
-                consume_optional_terminator();
             } else {
                 c.body = parse_expression();
                 consume_optional_terminator();
