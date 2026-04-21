@@ -97,13 +97,13 @@ private:
             return decl;
         }
 
-        error(current(), "ожидалось объявление верхнего уровня");
+        error(current(), "Expected top-level declaration");
         return nullptr;
     }
 
     std::vector<std::string> parse_template_params() {
         std::vector<std::string> out;
-        expect(TokenType::Less, "после template ожидается '<'");
+        expect(TokenType::Less, "Expected '<' after template");
         while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
             if (check(TokenType::KwTypename) || (check(TokenType::Identifier) && current().lexeme == "class")) {
                 advance();
