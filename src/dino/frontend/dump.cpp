@@ -203,6 +203,9 @@ std::string describe_type(const TypeRef& type) {
     if (type.is_const) {
         out += "const ";
     }
+    if (type.is_nonull) {
+        out += "nonull ";
+    }
     out += type.name;
     if (type.is_pointer) {
         out += "*";

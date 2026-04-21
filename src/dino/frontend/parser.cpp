@@ -217,6 +217,7 @@ private:
                         synchronize_struct();
                         continue;
                     }
+                    inject_nonull_param_checks(m.body, m.parameters);
                     decl->methods.push_back(std::move(m));
                 } else {
                     FieldDecl f;
@@ -264,6 +265,7 @@ private:
         if (!ctor.body) {
             return std::nullopt;
         }
+        inject_nonull_param_checks(ctor.body, ctor.parameters);
         if (ctor.name != name) {
             error(*n, "Constructor name should be same with the structure name");
         }
@@ -309,6 +311,7 @@ private:
         if (!decl->body) {
             return nullptr;
         }
+        inject_nonull_param_checks(decl->body, decl->parameters);
         return decl;
     }
 
@@ -339,6 +342,8 @@ private:
         while (check(TokenType::Identifier) && (current().lexeme == "const" || current().lexeme == "nonull")) {
             if (current().lexeme == "const") {
                 type.is_const = true;
+            } else if (current().lexeme == "nonull") {
+                type.is_nonull = true;
             }
             advance();
         }
@@ -363,6 +368,8 @@ private:
             if (check(TokenType::Identifier) && (current().lexeme == "const" || current().lexeme == "nonull")) {
                 if (current().lexeme == "const") {
                     type.is_const = true;
+                } else if (current().lexeme == "nonull") {
+                    type.is_nonull = true;
                 }
                 advance();
                 continue;
@@ -371,6 +378,55 @@ private:
         }
 
         return type;
+    }
+
+    StmtPtr make_nonull_check(const std::string& var_name, const SourceLocation& loc) {
+        auto cond_expr = std::make_unique<UnaryExpr>();
+        cond_expr->location = loc;
+        cond_expr->op = "!";
+        auto id_expr = std::make_unique<IdentifierExpr>();
+        id_expr->location = loc;
+        id_expr->name = var_name;
+        cond_expr->operand = std::move(id_expr);
+
+        auto panic_call = std::make_unique<CallExpr>();
+        panic_call->location = loc;
+        auto panic_id = std::make_unique<IdentifierExpr>();
+        panic_id->location = loc;
+        panic_id->name = "panic";
+        panic_call->callee = std::move(panic_id);
+        auto msg = std::make_unique<LiteralExpr>();
+        msg->location = loc;
+        msg->value = "\"" + var_name + " should be valid\"";
+        msg->literal_kind = "String";
+        panic_call->args.push_back(std::move(msg));
+
+        auto expr_stmt = std::make_unique<ExprStmt>();
+        expr_stmt->location = loc;
+        expr_stmt->expr = std::move(panic_call);
+
+        auto if_stmt = std::make_unique<IfStmt>();
+        if_stmt->location = loc;
+        if_stmt->condition = std::move(cond_expr);
+        if_stmt->then_stmt = std::move(expr_stmt);
+        return if_stmt;
+    }
+
+    void inject_nonull_param_checks(std::unique_ptr<BlockStmt>& body, const std::vector<Parameter>& params) {
+        if (!body) {
+            return;
+        }
+        std::vector<StmtPtr> checks;
+        for (const auto& p : params) {
+            if (p.type.is_nonull && !p.name.empty()) {
+                checks.push_back(make_nonull_check(p.name, body->location));
+            }
+        }
+        if (!checks.empty()) {
+            checks.insert(checks.end(), std::make_move_iterator(body->statements.begin()),
+                          std::make_move_iterator(body->statements.end()));
+            body->statements = std::move(checks);
+        }
     }
 
     std::unique_ptr<BlockStmt> parse_block_stmt() {
@@ -382,6 +438,13 @@ private:
         block->location = previous().location;
         while (!check(TokenType::RBrace) && !check(TokenType::EndOfFile)) {
             if (auto st = parse_statement()) {
+                if (auto* var_decl = dynamic_cast<VarDeclStmt*>(st.get())) {
+                    if (var_decl->needs_nonull_check) {
+                        block->statements.push_back(std::move(st));
+                        block->statements.push_back(make_nonull_check(var_decl->name, var_decl->location));
+                        continue;
+                    }
+                }
                 block->statements.push_back(std::move(st));
             } else {
                 synchronize_statement();
@@ -542,17 +605,18 @@ private:
 
         if (!semicolon_consumed) {
             if (match(TokenType::Semicolon)) {
-                return st;
-            }
-            const bool is_yielding_expr =
-                st->init && (dynamic_cast<IfExpr*>(st->init.get()) != nullptr || dynamic_cast<MatchExpr*>(st->init.get()) != nullptr);
-            const bool safe_boundary =
-                check(TokenType::KwElse) || check(TokenType::KwCase) || check(TokenType::KwDefault) || check(TokenType::RBrace) ||
-                check(TokenType::EndOfFile) || check(TokenType::KwIf) || check(TokenType::KwWhile) || check(TokenType::KwFor) ||
-                check(TokenType::KwReturn) || check(TokenType::KwYield) || check(TokenType::KwFallthrough) || check(TokenType::LBrace) ||
-                is_type_start(current());
-            if (!(is_yielding_expr && safe_boundary)) {
-                expect(TokenType::Semicolon, "Expected ';' after variable declaration");
+                // Don't return here - check for nonull first
+            } else {
+                const bool is_yielding_expr =
+                    st->init && (dynamic_cast<IfExpr*>(st->init.get()) != nullptr || dynamic_cast<MatchExpr*>(st->init.get()) != nullptr);
+                const bool safe_boundary =
+                    check(TokenType::KwElse) || check(TokenType::KwCase) || check(TokenType::KwDefault) || check(TokenType::RBrace) ||
+                    check(TokenType::EndOfFile) || check(TokenType::KwIf) || check(TokenType::KwWhile) || check(TokenType::KwFor) ||
+                    check(TokenType::KwReturn) || check(TokenType::KwYield) || check(TokenType::KwFallthrough) || check(TokenType::LBrace) ||
+                    is_type_start(current());
+                if (!(is_yielding_expr && safe_boundary)) {
+                    expect(TokenType::Semicolon, "Expected ';' after variable declaration");
+                }
             }
         } else if (!match(TokenType::Semicolon)) {
             if (!(check(TokenType::KwElse) || check(TokenType::KwCase) || check(TokenType::KwDefault) || check(TokenType::RBrace) ||
@@ -560,6 +624,11 @@ private:
                 expect(TokenType::Semicolon, "Expeced ';' after variable declaration");
             }
         }
+
+        if (st->type.is_nonull) {
+            st->needs_nonull_check = true;
+        }
+
         return st;
     }
 

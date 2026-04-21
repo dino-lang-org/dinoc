@@ -15,6 +15,7 @@ namespace {
 struct SemanticType {
     std::string name;
     bool is_const = false;
+    bool is_nonull = false;
     bool is_pointer = false;
     bool is_reference = false;
     bool is_array = false;
@@ -123,6 +124,7 @@ SemanticType from_typeref(const TypeRef& ref) {
     SemanticType t;
     t.name = ref.name;
     t.is_const = ref.is_const;
+    t.is_nonull = ref.is_nonull;
     t.is_pointer = ref.is_pointer;
     t.is_reference = ref.is_reference;
     return t;

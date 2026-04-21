@@ -43,6 +43,7 @@ struct Decl : Node {
 struct TypeRef {
     std::string name;
     bool is_const = false;
+    bool is_nonull = false;
     bool is_pointer = false;
     bool is_reference = false;
     bool variadic = false;
@@ -158,6 +159,7 @@ struct VarDeclStmt : Stmt {
     bool is_array = false;
     ExprPtr init;
     std::vector<ExprPtr> array_init;
+    bool needs_nonull_check = false;
     [[nodiscard]] std::string kind() const override { return "VarDeclStmt"; }
 };
 
