@@ -168,17 +168,15 @@ private:
             }
 
             if (check(TokenType::Tilde)) {
-                auto dtor = parse_destructor_decl(member_access, decl->name);
-                if (dtor) {
-                    decl->destructors.push_back(std::move(*dtor));
+                if (auto destructor = parse_destructor_decl(member_access, decl->name); destructor) {
+                    decl->destructors.push_back(std::move(*destructor));
                 }
                 continue;
             }
 
             if (check(TokenType::Identifier) && current().lexeme == decl->name && peek().type == TokenType::LParen) {
-                auto ctor = parse_constructor_decl(member_access, decl->name);
-                if (ctor) {
-                    decl->constructors.push_back(std::move(*ctor));
+                if (auto constructor = parse_constructor_decl(member_access, decl->name); constructor) {
+                    decl->constructors.push_back(std::move(*constructor));
                 }
                 continue;
             }
@@ -476,8 +474,7 @@ private:
         if (looks_like_range_for()) {
             Parameter p;
             p.type = parse_type_ref();
-            auto n = expect(TokenType::Identifier, "Expected variable name in for-in");
-            if (n) {
+            if (auto n = expect(TokenType::Identifier, "Expected variable name in for-in")) {
                 p.name = n->lexeme;
             }
             expect(TokenType::KwIn, "Expected in in for-in");
