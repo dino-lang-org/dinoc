@@ -26,18 +26,18 @@ struct Node {
 };
 
 struct Expr : Node {
-    virtual std::string kind() const = 0;
+    [[nodiscard]] virtual std::string kind() const = 0;
 };
 
 struct Stmt : Node {
-    virtual std::string kind() const = 0;
+    [[nodiscard]] virtual std::string kind() const = 0;
 };
 
 struct Decl : Node {
     AccessModifier access = AccessModifier::Private;
     std::vector<std::string> template_params;
-    virtual std::string kind() const = 0;
-    virtual std::optional<std::string> declared_name() const { return std::nullopt; }
+    [[nodiscard]] virtual std::string kind() const = 0;
+    [[nodiscard]] virtual std::optional<std::string> declared_name() const { return std::nullopt; }
 };
 
 struct TypeRef {
@@ -56,58 +56,58 @@ struct Parameter {
 struct LiteralExpr : Expr {
     std::string value;
     std::string literal_kind;
-    std::string kind() const override { return "LiteralExpr"; }
+    [[nodiscard]] std::string kind() const override { return "LiteralExpr"; }
 };
 
 struct IdentifierExpr : Expr {
     std::string name;
-    std::string kind() const override { return "IdentifierExpr"; }
+    [[nodiscard]] std::string kind() const override { return "IdentifierExpr"; }
 };
 
 struct UnaryExpr : Expr {
     std::string op;
     ExprPtr operand;
     bool postfix = false;
-    std::string kind() const override { return "UnaryExpr"; }
+    [[nodiscard]] std::string kind() const override { return "UnaryExpr"; }
 };
 
 struct BinaryExpr : Expr {
     std::string op;
     ExprPtr lhs;
     ExprPtr rhs;
-    std::string kind() const override { return "BinaryExpr"; }
+    [[nodiscard]] std::string kind() const override { return "BinaryExpr"; }
 };
 
 struct TernaryExpr : Expr {
     ExprPtr condition;
     ExprPtr then_expr;
     ExprPtr else_expr;
-    std::string kind() const override { return "TernaryExpr"; }
+    [[nodiscard]] std::string kind() const override { return "TernaryExpr"; }
 };
 
 struct CallExpr : Expr {
     ExprPtr callee;
     std::vector<ExprPtr> args;
-    std::string kind() const override { return "CallExpr"; }
+    [[nodiscard]] std::string kind() const override { return "CallExpr"; }
 };
 
 struct MemberExpr : Expr {
     ExprPtr object;
     std::string member;
     bool via_arrow = false;
-    std::string kind() const override { return "MemberExpr"; }
+    [[nodiscard]] std::string kind() const override { return "MemberExpr"; }
 };
 
 struct IndexExpr : Expr {
     ExprPtr object;
     ExprPtr index;
-    std::string kind() const override { return "IndexExpr"; }
+    [[nodiscard]] std::string kind() const override { return "IndexExpr"; }
 };
 
 struct TypeCastExpr : Expr {
     TypeRef target_type;
     ExprPtr value;
-    std::string kind() const override { return "TypeCastExpr"; }
+    [[nodiscard]] std::string kind() const override { return "TypeCastExpr"; }
 };
 
 struct BlockStmt;
@@ -116,7 +116,7 @@ struct IfExpr : Expr {
     ExprPtr condition;
     std::variant<ExprPtr, std::unique_ptr<BlockStmt>> then_branch;
     std::optional<std::variant<ExprPtr, std::unique_ptr<BlockStmt>>> else_branch;
-    std::string kind() const override { return "IfExpr"; }
+    [[nodiscard]] std::string kind() const override { return "IfExpr"; }
 };
 
 struct MatchCase {
@@ -130,26 +130,26 @@ struct MatchCase {
 struct MatchExpr : Expr {
     ExprPtr subject;
     std::vector<MatchCase> cases;
-    std::string kind() const override { return "MatchExpr"; }
+    [[nodiscard]] std::string kind() const override { return "MatchExpr"; }
 };
 
 struct ExprStmt : Stmt {
     ExprPtr expr;
-    std::string kind() const override { return "ExprStmt"; }
+    [[nodiscard]] std::string kind() const override { return "ExprStmt"; }
 };
 
 struct ReturnStmt : Stmt {
     ExprPtr value;
-    std::string kind() const override { return "ReturnStmt"; }
+    [[nodiscard]] std::string kind() const override { return "ReturnStmt"; }
 };
 
 struct YieldStmt : Stmt {
     ExprPtr value;
-    std::string kind() const override { return "YieldStmt"; }
+    [[nodiscard]] std::string kind() const override { return "YieldStmt"; }
 };
 
 struct FallthroughStmt : Stmt {
-    std::string kind() const override { return "FallthroughStmt"; }
+    [[nodiscard]] std::string kind() const override { return "FallthroughStmt"; }
 };
 
 struct VarDeclStmt : Stmt {
@@ -158,25 +158,25 @@ struct VarDeclStmt : Stmt {
     bool is_array = false;
     ExprPtr init;
     std::vector<ExprPtr> array_init;
-    std::string kind() const override { return "VarDeclStmt"; }
+    [[nodiscard]] std::string kind() const override { return "VarDeclStmt"; }
 };
 
 struct BlockStmt : Stmt {
     std::vector<StmtPtr> statements;
-    std::string kind() const override { return "BlockStmt"; }
+    [[nodiscard]] std::string kind() const override { return "BlockStmt"; }
 };
 
 struct IfStmt : Stmt {
     ExprPtr condition;
     StmtPtr then_stmt;
     StmtPtr else_stmt;
-    std::string kind() const override { return "IfStmt"; }
+    [[nodiscard]] std::string kind() const override { return "IfStmt"; }
 };
 
 struct WhileStmt : Stmt {
     ExprPtr condition;
     StmtPtr body;
-    std::string kind() const override { return "WhileStmt"; }
+    [[nodiscard]] std::string kind() const override { return "WhileStmt"; }
 };
 
 struct ForStmt : Stmt {
@@ -186,13 +186,13 @@ struct ForStmt : Stmt {
     std::optional<Parameter> range_var;
     ExprPtr range_expr;
     StmtPtr body;
-    std::string kind() const override { return "ForStmt"; }
+    [[nodiscard]] std::string kind() const override { return "ForStmt"; }
 };
 
 struct IncludeDecl : Decl {
     std::string include_path;
     std::string resolved_path;
-    std::string kind() const override { return "IncludeDecl"; }
+    [[nodiscard]] std::string kind() const override { return "IncludeDecl"; }
 };
 
 struct FunctionDecl : Decl {
@@ -200,8 +200,8 @@ struct FunctionDecl : Decl {
     std::string name;
     std::vector<Parameter> parameters;
     std::unique_ptr<BlockStmt> body;
-    std::string kind() const override { return "FunctionDecl"; }
-    std::optional<std::string> declared_name() const override { return name; }
+    [[nodiscard]] std::string kind() const override { return "FunctionDecl"; }
+    [[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
 };
 
 struct FieldDecl : Node {
@@ -244,8 +244,8 @@ struct StructDecl : Decl {
     std::vector<DestructorDecl> destructors;
     std::vector<MethodDecl> methods;
     std::vector<ConversionDecl> conversions;
-    std::string kind() const override { return "StructDecl"; }
-    std::optional<std::string> declared_name() const override { return name; }
+    [[nodiscard]] std::string kind() const override { return "StructDecl"; }
+    [[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
 };
 
 struct TranslationUnit {

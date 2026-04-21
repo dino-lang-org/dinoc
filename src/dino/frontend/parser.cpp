@@ -116,18 +116,19 @@ private:
             }
             if (!match(TokenType::Comma)) {}
         }
-        expect(TokenType::Greater, "ожидался '>' после template-параметров");
+        expect(TokenType::Greater, "Expected '>' after template parameters ");
         return out;
     }
 
     std::unique_ptr<IncludeDecl> parse_include_decl(AccessModifier access) {
-        auto at = expect(TokenType::At, "ожидался '@'");
-        if (!expect(TokenType::KwInclude, "ожидалось include после '@'")) {
+        auto at = expect(TokenType::At, "Expected '@'");
+        // TODO: Change the error message when adding other directives
+        if (!expect(TokenType::KwInclude, "Expected 'include' after '@'")) {
             return nullptr;
         }
-        expect(TokenType::LParen, "ожидалась '(' после include");
-        auto path_tok = expect(TokenType::String, "ожидалась строка пути в include");
-        expect(TokenType::RParen, "ожидалась ')' после include");
+        expect(TokenType::LParen, "Expected '(' after include");
+        auto path_tok = expect(TokenType::String, "Expected path in the include");
+        expect(TokenType::RParen, "Expected ')' after include");
         match(TokenType::Semicolon);
 
         if (!path_tok) {
@@ -146,7 +147,7 @@ private:
     }
 
     std::unique_ptr<StructDecl> parse_struct_decl(AccessModifier access) {
-        auto name = expect(TokenType::Identifier, "ожидалось имя структуры");
+        auto name = expect(TokenType::Identifier, "Expected structure name");
         if (!name) {
             return nullptr;
         }
@@ -156,7 +157,7 @@ private:
         decl->access = access;
         decl->name = name->lexeme;
 
-        expect(TokenType::LBrace, "ожидалась '{' после объявления структуры");
+        expect(TokenType::LBrace, "Expected '{' after field declaration");
 
         while (!check(TokenType::RBrace) && !check(TokenType::EndOfFile)) {
             AccessModifier member_access = AccessModifier::Private;
@@ -189,8 +190,8 @@ private:
                     conv.location = current().location;
                     conv.access = member_access;
                     conv.target_type = std::move(type);
-                    expect(TokenType::LParen, "ожидалась '(' после типа оператора преобразования");
-                    expect(TokenType::RParen, "ожидалась ')' после типа оператора преобразования");
+                    expect(TokenType::LParen, "Expected '(' after transformator type declaration");
+                    expect(TokenType::RParen, "Expected ')' after transformator type declaration");
                     conv.body = parse_block_stmt();
                     if (!conv.body) {
                         synchronize_struct();
@@ -200,7 +201,7 @@ private:
                     continue;
                 }
 
-                auto id = expect(TokenType::Identifier, "ожидалось имя поля или метода");
+                auto id = expect(TokenType::Identifier, "Expected field/method name");
                 if (!id) {
                     synchronize_struct();
                     continue;
@@ -226,30 +227,30 @@ private:
                     f.type = std::move(type);
                     f.names.push_back(id->lexeme);
                     while (match(TokenType::Comma)) {
-                        auto n = expect(TokenType::Identifier, "ожидалось имя поля");
+                        auto n = expect(TokenType::Identifier, "Expected field name");
                         if (!n) {
                             break;
                         }
                         f.names.push_back(n->lexeme);
                     }
-                    expect(TokenType::Semicolon, "ожидалась ';' после поля");
+                    expect(TokenType::Semicolon, "Expected ';' after field/method");
                     decl->fields.push_back(std::move(f));
                 }
                 continue;
             }
 
-            error(current(), "ожидалось поле, метод, конструктор или деструктор");
+            error(current(), "Expected field, method, constructor or destructor");
             synchronize_struct();
         }
 
-        expect(TokenType::RBrace, "ожидалась '}' после тела структуры");
+        expect(TokenType::RBrace, "Expected '}' after structure body");
         return decl;
     }
 
     std::optional<ConstructorDecl> parse_constructor_decl(AccessModifier access, const std::string& name) {
         ConstructorDecl ctor;
         ctor.access = access;
-        auto n = expect(TokenType::Identifier, "ожидалось имя конструктора");
+        auto n = expect(TokenType::Identifier, "Expected constructor name");
         if (!n) {
             return std::nullopt;
         }
@@ -266,7 +267,7 @@ private:
             return std::nullopt;
         }
         if (ctor.name != name) {
-            error(*n, "имя конструктора должно совпадать с именем структуры");
+            error(*n, "Constructor name should be same with the structure name");
         }
         return ctor;
     }
@@ -274,28 +275,28 @@ private:
     std::optional<DestructorDecl> parse_destructor_decl(AccessModifier access, const std::string& name) {
         DestructorDecl dtor;
         dtor.access = access;
-        auto tilde = expect(TokenType::Tilde, "ожидался '~' перед именем деструктора");
-        auto n = expect(TokenType::Identifier, "ожидалось имя деструктора");
+        auto tilde = expect(TokenType::Tilde, "Expected '~' before destructor declaration");
+        auto n = expect(TokenType::Identifier, "Expected destructor name");
         if (!n) {
             return std::nullopt;
         }
         dtor.location = tilde ? tilde->location : n->location;
         dtor.name = n->lexeme;
-        expect(TokenType::LParen, "ожидалась '('");
-        expect(TokenType::RParen, "ожидалась ')'");
+        expect(TokenType::LParen, "Expected '(");
+        expect(TokenType::RParen, "Expected ')");
         dtor.body = parse_block_stmt();
         if (!dtor.body) {
             return std::nullopt;
         }
         if (dtor.name != name) {
-            error(*n, "имя деструктора должно совпадать с именем структуры");
+            error(*n, "Destructor name should be same with the structure name");
         }
         return dtor;
     }
 
     std::unique_ptr<FunctionDecl> parse_function_decl(AccessModifier access) {
         TypeRef ret = parse_type_ref();
-        auto name = expect(TokenType::Identifier, "ожидалось имя функции");
+        auto name = expect(TokenType::Identifier, "Expected function name");
         if (!name) {
             return nullptr;
         }
@@ -315,7 +316,7 @@ private:
 
     std::vector<Parameter> parse_parameter_list() {
         std::vector<Parameter> params;
-        expect(TokenType::LParen, "ожидалась '('");
+        expect(TokenType::LParen, "Expected '('");
         while (!check(TokenType::RParen) && !check(TokenType::EndOfFile)) {
             Parameter p;
             p.type = parse_type_ref();
@@ -330,7 +331,7 @@ private:
                 break;
             }
         }
-        expect(TokenType::RParen, "ожидалась ')' после параметров");
+        expect(TokenType::RParen, "Expected ')' after parameters");
         return params;
     }
 
@@ -347,7 +348,7 @@ private:
         if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
             type.name = advance().lexeme;
         } else {
-            error(current(), "ожидалось имя типа");
+            error(current(), "Expected type name");
             type.name = "<error>";
             return type;
         }
@@ -375,7 +376,7 @@ private:
     }
 
     std::unique_ptr<BlockStmt> parse_block_stmt() {
-        if (!expect(TokenType::LBrace, "ожидалась '{'")) {
+        if (!expect(TokenType::LBrace, "Expected '{'")) {
             return nullptr;
         }
 
@@ -388,7 +389,7 @@ private:
                 synchronize_statement();
             }
         }
-        expect(TokenType::RBrace, "ожидалась '}'");
+        expect(TokenType::RBrace, "Expected '}'");
         return block;
     }
 
@@ -402,7 +403,7 @@ private:
             if (!check(TokenType::Semicolon)) {
                 st->value = parse_expression();
             }
-            expect(TokenType::Semicolon, "ожидалась ';' после return");
+            expect(TokenType::Semicolon, "Expected ';' after return");
             return st;
         }
         if (match(TokenType::KwYield)) {
@@ -435,14 +436,14 @@ private:
         auto st = std::make_unique<ExprStmt>();
         st->location = current().location;
         st->expr = parse_expression();
-        expect(TokenType::Semicolon, "ожидалась ';' после выражения");
+        expect(TokenType::Semicolon, "Expected ';' after expression");
         return st;
     }
 
     StmtPtr parse_if_stmt(const SourceLocation& if_loc) {
-        expect(TokenType::LParen, "ожидалась '('");
+        expect(TokenType::LParen, "Expected '('");
         auto cond = parse_expression();
-        expect(TokenType::RParen, "ожидалась ')'");
+        expect(TokenType::RParen, "Expected ')'");
 
         auto st = std::make_unique<IfStmt>();
         st->location = if_loc;
@@ -455,9 +456,9 @@ private:
     }
 
     StmtPtr parse_while_stmt(const SourceLocation& while_loc) {
-        expect(TokenType::LParen, "ожидалась '('");
+        expect(TokenType::LParen, "Expected '('");
         auto cond = parse_expression();
-        expect(TokenType::RParen, "ожидалась ')'");
+        expect(TokenType::RParen, "Expected ')'");
 
         auto st = std::make_unique<WhileStmt>();
         st->location = while_loc;
@@ -467,7 +468,7 @@ private:
     }
 
     StmtPtr parse_for_stmt(const SourceLocation& for_loc) {
-        expect(TokenType::LParen, "ожидалась '('");
+        expect(TokenType::LParen, "Expected '('");
 
         auto st = std::make_unique<ForStmt>();
         st->location = for_loc;
@@ -475,14 +476,14 @@ private:
         if (looks_like_range_for()) {
             Parameter p;
             p.type = parse_type_ref();
-            auto n = expect(TokenType::Identifier, "ожидалось имя переменной for-in");
+            auto n = expect(TokenType::Identifier, "Expected variable name in for-in");
             if (n) {
                 p.name = n->lexeme;
             }
-            expect(TokenType::KwIn, "ожидался in в for-in");
+            expect(TokenType::KwIn, "Expected in in for-in");
             st->range_var = std::move(p);
             st->range_expr = parse_expression();
-            expect(TokenType::RParen, "ожидалась ')' после for-in");
+            expect(TokenType::RParen, "Expected ')' after for-in");
             st->body = parse_statement();
             return st;
         }
@@ -495,25 +496,25 @@ private:
             init->location = current().location;
             init->expr = parse_expression();
             st->init = std::move(init);
-            expect(TokenType::Semicolon, "ожидалась ';' после init в for");
+            expect(TokenType::Semicolon, "Expected ';' after init in for");
         }
 
         if (!check(TokenType::Semicolon)) {
             st->condition = parse_expression();
         }
-        expect(TokenType::Semicolon, "ожидалась ';' после условия в for");
+        expect(TokenType::Semicolon, "Expected ';' after expression in for");
 
         if (!check(TokenType::RParen)) {
             st->step = parse_expression();
         }
-        expect(TokenType::RParen, "ожидалась ')' после for");
+        expect(TokenType::RParen, "Expected ')' after expression in for");
         st->body = parse_statement();
         return st;
     }
 
     StmtPtr parse_var_decl_stmt(bool semicolon_consumed = false) {
         TypeRef type = parse_type_ref();
-        auto name = expect(TokenType::Identifier, "ожидалось имя переменной");
+        auto name = expect(TokenType::Identifier, "Expected variable name");
         if (!name) {
             return nullptr;
         }
@@ -524,7 +525,7 @@ private:
         st->name = name->lexeme;
 
         if (match(TokenType::LBracket)) {
-            expect(TokenType::RBracket, "ожидалась ']' после массива");
+            expect(TokenType::RBracket, "Expected '[' after array name");
             st->is_array = true;
         }
 
@@ -536,7 +537,7 @@ private:
                         break;
                     }
                 }
-                expect(TokenType::RBrace, "ожидалась '}' после инициализатора массива");
+                expect(TokenType::RBrace, "Expected '}' after array initialization");
             } else {
                 st->init = parse_expression();
             }
@@ -554,12 +555,12 @@ private:
                 check(TokenType::KwReturn) || check(TokenType::KwYield) || check(TokenType::KwFallthrough) || check(TokenType::LBrace) ||
                 is_type_start(current());
             if (!(is_yielding_expr && safe_boundary)) {
-                expect(TokenType::Semicolon, "ожидалась ';' после объявления переменной");
+                expect(TokenType::Semicolon, "Expected ';' after variable declaration");
             }
         } else if (!match(TokenType::Semicolon)) {
             if (!(check(TokenType::KwElse) || check(TokenType::KwCase) || check(TokenType::KwDefault) || check(TokenType::RBrace) ||
                   check(TokenType::EndOfFile))) {
-                expect(TokenType::Semicolon, "ожидалась ';' после объявления переменной");
+                expect(TokenType::Semicolon, "Expeced ';' after variable declaration");
             }
         }
         return st;
@@ -589,7 +590,7 @@ private:
         auto cond = parse_logical_or();
         if (match(TokenType::Question)) {
             auto then_e = parse_expression();
-            expect(TokenType::Colon, "ожидалось ':' в тернарном выражении");
+            expect(TokenType::Colon, "Expected ':' in ternary expression");
             auto else_e = parse_expression();
             auto t = std::make_unique<TernaryExpr>();
             t->location = cond ? cond->location : current().location;
@@ -658,13 +659,13 @@ private:
                         break;
                     }
                 }
-                expect(TokenType::RParen, "ожидалась ')' после аргументов");
+                expect(TokenType::RParen, "Expected ')' after arguments");
                 expr = std::move(call);
                 continue;
             }
             if (match(TokenType::Dot) || match(TokenType::Arrow)) {
                 const bool via_arrow = previous().type == TokenType::Arrow;
-                auto member = expect(TokenType::Identifier, "ожидалось имя поля/метода");
+                auto member = expect(TokenType::Identifier, "Expected field/method name");
                 if (!member) {
                     return expr;
                 }
@@ -681,7 +682,7 @@ private:
                 idx->location = previous().location;
                 idx->object = std::move(expr);
                 idx->index = parse_expression();
-                expect(TokenType::RBracket, "ожидалась ']' после индекса");
+                expect(TokenType::RBracket, "Expected ']' after index");
                 expr = std::move(idx);
                 continue;
             }
@@ -728,12 +729,12 @@ private:
             if (previous().type == TokenType::Identifier && previous().lexeme == "type_cast" && check(TokenType::Less)) {
                 auto type_cast = std::make_unique<TypeCastExpr>();
                 type_cast->location = previous().location;
-                expect(TokenType::Less, "ожидался '<' после type_cast");
+                expect(TokenType::Less, "Expected '<' after type_cast");
                 type_cast->target_type = parse_type_ref();
-                expect(TokenType::Greater, "ожидался '>' после типа в type_cast");
-                expect(TokenType::LParen, "ожидалась '(' после type_cast<T>");
+                expect(TokenType::Greater, "Expected '>' after type in type_cast");
+                expect(TokenType::LParen, "Expected '(' after type_cast<{}>", type_cast->target_type.name);
                 type_cast->value = parse_expression();
-                expect(TokenType::RParen, "ожидалась ')' после аргумента type_cast");
+                expect(TokenType::RParen, "Expected ')' after type_cast");
                 return type_cast;
             }
             auto id = std::make_unique<IdentifierExpr>();
@@ -743,11 +744,11 @@ private:
         }
         if (match(TokenType::LParen)) {
             auto expr = parse_expression();
-            expect(TokenType::RParen, "ожидалась ')' после выражения");
+            expect(TokenType::RParen, "Expected ')' after expression");
             return expr;
         }
 
-        error(current(), "ожидалось выражение");
+        error(current(), "Expected expression");
         auto id = std::make_unique<IdentifierExpr>();
         id->location = current().location;
         id->name = "<error>";
@@ -756,9 +757,9 @@ private:
     }
 
     ExprPtr parse_if_expression(const SourceLocation& loc) {
-        expect(TokenType::LParen, "ожидалась '(' после if");
+        expect(TokenType::LParen, "Expected '(' after if");
         auto condition = parse_expression();
-        expect(TokenType::RParen, "ожидалась ')' после условия if");
+        expect(TokenType::RParen, "Expected ')' after if condition");
 
         auto expr = std::make_unique<IfExpr>();
         expr->location = loc;
@@ -784,10 +785,10 @@ private:
     }
 
     ExprPtr parse_match_expression(const SourceLocation& loc) {
-        expect(TokenType::LParen, "ожидалась '(' после match");
+        expect(TokenType::LParen, "Expected '(' after match");
         auto subject = parse_expression();
-        expect(TokenType::RParen, "ожидалась ')' после match subject");
-        expect(TokenType::LBrace, "ожидалась '{' после match");
+        expect(TokenType::RParen, "Expected '(' after match subject");
+        expect(TokenType::LBrace, "Expected '{' after match");
 
         auto m = std::make_unique<MatchExpr>();
         m->location = loc;
@@ -801,10 +802,10 @@ private:
             } else if (match(TokenType::KwDefault)) {
                 c.is_default = true;
             } else {
-                error(current(), "ожидалось case/default в match");
+                error(current(), "Expected at least default case in match");
                 break;
             }
-            expect(TokenType::Colon, "ожидался ':' после case/default");
+            expect(TokenType::Colon, "Expected ':' after match case");
 
             if (match(TokenType::KwFallthrough)) {
                 c.fallthrough = true;
@@ -821,13 +822,13 @@ private:
 
             m->cases.push_back(std::move(c));
         }
-        expect(TokenType::RBrace, "ожидалась '}' после match");
+        expect(TokenType::RBrace, "Expected '}' after match");
         return m;
     }
 
-    bool looks_like_method_or_field() const { return is_type_start(current()); }
+    [[nodiscard]] bool looks_like_method_or_field() const { return is_type_start(current()); }
 
-    bool looks_like_function_decl() const {
+    [[nodiscard]] bool looks_like_function_decl() const {
         if (!is_type_start(current())) {
             return false;
         }
@@ -840,7 +841,7 @@ private:
         return at(i).type == TokenType::LParen;
     }
 
-    bool looks_like_var_decl_stmt() const {
+    [[nodiscard]] bool looks_like_var_decl_stmt() const {
         if (!is_type_start(current())) {
             return false;
         }
@@ -854,7 +855,7 @@ private:
         return t == TokenType::Assign || t == TokenType::Semicolon || t == TokenType::LBracket || t == TokenType::Comma;
     }
 
-    bool looks_like_range_for() const {
+    [[nodiscard]] bool looks_like_range_for() const {
         if (!is_type_start(current())) {
             return false;
         }
@@ -867,7 +868,7 @@ private:
         return at(i).type == TokenType::KwIn;
     }
 
-    bool is_type_start(const Token& t) const {
+    [[nodiscard]] bool is_type_start(const Token& t) const {
         if (is_builtin_type(t.type)) {
             return true;
         }
@@ -930,17 +931,17 @@ private:
         }
     }
 
-    const Token& current() const { return tokens_[pos_]; }
-    const Token& previous() const { return tokens_[pos_ - 1]; }
+    [[nodiscard]] const Token& current() const { return tokens_[pos_]; }
+    [[nodiscard]] const Token& previous() const { return tokens_[pos_ - 1]; }
 
-    const Token& at(size_t p) const {
+    [[nodiscard]] const Token& at(size_t p) const {
         if (p >= tokens_.size()) {
             return tokens_.back();
         }
         return tokens_[p];
     }
 
-    const Token& peek() const { return at(pos_ + 1); }
+    [[nodiscard]] const Token& peek() const { return at(pos_ + 1); }
 
     const Token& advance() {
         if (!check(TokenType::EndOfFile)) {
@@ -949,7 +950,7 @@ private:
         return previous();
     }
 
-    bool check(TokenType type) const { return current().type == type; }
+    [[nodiscard]] bool check(TokenType type) const { return current().type == type; }
 
     bool match(TokenType type) {
         if (!check(type)) {
@@ -969,16 +970,16 @@ private:
         return false;
     }
 
-    const Token* expect(TokenType type, const char* message) {
+    const Token* expect(TokenType type, const std::string& format, auto&&... args) {
         if (check(type)) {
             return &advance();
         }
-        error(current(), message);
+        error(current(), format, args...);
         return nullptr;
     }
 
-    void error(const Token& where, const std::string& message) {
-        errors_.push_back(ParseMessage {where.location, message});
+    void error(const Token& where, const std::string& format, auto&&... args) {
+        errors_.push_back(ParseMessage {where.location, std::vformat(format, std::make_format_args(args...))});
     }
 
 private:
@@ -1032,7 +1033,7 @@ bool ParserDriver::parse_unit_recursive(const std::string& path, ParseResult& re
 
     const std::string source = read_file(path);
     if (source.empty()) {
-        result.errors.push_back(ParseMessage {SourceLocation {path, 1, 1}, "не удалось прочитать файл"});
+        result.errors.push_back(ParseMessage {SourceLocation {path, 1, 1}, "Can't read file"});
         return false;
     }
 

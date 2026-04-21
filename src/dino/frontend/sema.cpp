@@ -222,7 +222,7 @@ private:
         std::unordered_map<std::string, SemanticType> vars;
     };
 
-    void push_scope() { scopes_.push_back(Scope {}); }
+    void push_scope() { scopes_.emplace_back(); }
     void pop_scope() {
         if (!scopes_.empty()) {
             scopes_.pop_back();
@@ -236,7 +236,7 @@ private:
         scopes_.back().vars[name] = t;
     }
 
-    std::optional<SemanticType> lookup_var(const std::string& name) const {
+    [[nodiscard]] std::optional<SemanticType> lookup_var(const std::string& name) const {
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
             const auto f = it->vars.find(name);
             if (f != it->vars.end()) {
@@ -246,17 +246,17 @@ private:
         return std::nullopt;
     }
 
-    void error(const SourceLocation& loc, const std::string& text) { result_.errors.push_back(ParseMessage {loc, text}); }
-    void warning(const SourceLocation& loc, const std::string& text) { result_.warnings.push_back(ParseMessage {loc, text}); }
+    void error(const SourceLocation& loc, const std::string& format, auto&&... args) { result_.errors.push_back(ParseMessage {loc, std::vformat(format, std::make_format_args(args...))}); }
+    void warning(const SourceLocation& loc, const std::string& format, auto&&... args) { result_.warnings.push_back(ParseMessage {loc, std::vformat(format, std::make_format_args(args...))}); }
 
-    bool is_visible_symbol(const std::string& name) const {
+    [[nodiscard]] bool is_visible_symbol(const std::string& name) const {
         if (current_unit_ == nullptr) {
             return true;
         }
         return current_unit_->local_symbols.contains(name);
     }
 
-    bool is_known_type(const SemanticType& t) const {
+    [[nodiscard]] bool is_known_type(const SemanticType& t) const {
         if (t.is_error) {
             return true;
         }
@@ -363,7 +363,7 @@ private:
             SemanticType ft = from_typeref(f.type);
             if (!is_known_type(ft) || (!is_builtin_type_name(ft.name) && !active_template_types_.contains(ft.name) &&
                                        !is_visible_symbol(ft.name) && ft.name != st.name)) {
-                error(f.location, "неизвестный тип поля: " + f.type.name);
+                error(f.location, "In structure '{}': unknown type '{}' for field with name '{}'", st.name, f.type.name, ft.name);
             }
         }
 
@@ -392,7 +392,7 @@ private:
         SemanticType ret = from_typeref(fn.return_type);
         if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
                                     !is_visible_symbol(ret.name))) {
-            error(fn.location, "неизвестный тип возврата функции: " + fn.return_type.name);
+            error(fn.location, "Unknown return type for function '{}': '{}'", fn.name, fn.return_type.name);
         }
 
         push_scope();
@@ -400,7 +400,7 @@ private:
             SemanticType pt = from_typeref(p.type);
             if (!is_known_type(pt) || (!is_builtin_type_name(pt.name) && !active_template_types_.contains(pt.name) &&
                                        !is_visible_symbol(pt.name))) {
-                error(fn.location, "неизвестный тип параметра: " + p.type.name);
+                error(fn.location, "In function '{}': unknown type '{}' for parameter with name {}" + p.type.name, p.name);
             }
             if (!p.name.empty()) {
                 declare_var(p.name, pt);
@@ -425,7 +425,7 @@ private:
             SemanticType pt = from_typeref(p.type);
             if (!is_known_type(pt) || (!is_builtin_type_name(pt.name) && !active_template_types_.contains(pt.name) &&
                                        !is_visible_symbol(pt.name) && pt.name != owner.name)) {
-                error(ctor.location, "неизвестный тип параметра конструктора: " + p.type.name);
+                error(ctor.location, "In structure '{}': unknown type '{}' for constructor parameter with name '{}'", owner.name, p.type.name, p.name);
             }
             if (!p.name.empty()) {
                 declare_var(p.name, pt);
@@ -455,7 +455,7 @@ private:
         SemanticType ret = from_typeref(method.return_type);
         if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
                                     !is_visible_symbol(ret.name) && ret.name != owner.name)) {
-            error(method.location, "неизвестный тип возврата метода: " + method.return_type.name);
+            error(method.location, "In structure '{}': in method '{}': unknown return type: '{}'", owner.name, method.name, method.return_type.name);
         }
 
         push_scope();
@@ -468,7 +468,7 @@ private:
             SemanticType pt = from_typeref(p.type);
             if (!is_known_type(pt) || (!is_builtin_type_name(pt.name) && !active_template_types_.contains(pt.name) &&
                                        !is_visible_symbol(pt.name) && pt.name != owner.name)) {
-                error(method.location, "неизвестный тип параметра метода: " + p.type.name);
+                error(method.location, "In structure '{}': in method '{}': unknown type '{}' for parameter with name '{}'", owner.name, method.name, p.type.name, p.name);
             }
             if (!p.name.empty()) {
                 declare_var(p.name, pt);
@@ -485,7 +485,7 @@ private:
         SemanticType ret = from_typeref(conv.target_type);
         if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
                                     !is_visible_symbol(ret.name) && ret.name != owner.name)) {
-            error(conv.location, "неизвестный тип конвертора: " + conv.target_type.name);
+            error(conv.location, "In structure '{}': unknown convertor type: '{}'", owner.name, conv.target_type.name);
         }
 
         push_scope();
@@ -500,7 +500,7 @@ private:
         pop_scope();
     }
 
-    const std::vector<FunctionSig>* visible_functions(const std::string& name) const {
+    [[nodiscard]] const std::vector<FunctionSig>* visible_functions(const std::string& name) const {
         const auto it = functions_.find(name);
         if (it == functions_.end()) {
             return nullptr;
@@ -528,7 +528,7 @@ private:
         return true;
     }
 
-    const FunctionSig* choose_overload(const std::vector<SemanticType>& args, const std::vector<FunctionSig>& overloads) const {
+    [[nodiscard]] const FunctionSig* choose_overload(const std::vector<SemanticType>& args, const std::vector<FunctionSig>& overloads) const {
         for (const auto& sig : overloads) {
             if (args_match_sig(args, sig)) {
                 return &sig;
@@ -537,7 +537,7 @@ private:
         return nullptr;
     }
 
-    bool can_explicit_struct_cast(const SemanticType& from, const SemanticType& to) const {
+    [[nodiscard]] bool can_explicit_struct_cast(const SemanticType& from, const SemanticType& to) const {
         if (from.is_error || to.is_error || from.is_pointer || from.is_array) {
             return false;
         }
@@ -582,8 +582,7 @@ private:
             SemanticType expected = return_type_stack_.empty() ? SemanticType::void_type() : return_type_stack_.back();
             SemanticType got = s->value ? infer_expr_type(s->value.get()) : SemanticType::void_type();
             if (!is_assignable_to(got, expected)) {
-                error(s->location, "несовместимый тип return: ожидается " + type_to_string(expected) + ", получен " +
-                                       type_to_string(got));
+                error(s->location, "Incompatible types for return: expected: '{}', got: '{}'", type_to_string(expected), type_to_string(got));
             }
             return;
         }
@@ -591,7 +590,7 @@ private:
         if (const auto* s = dynamic_cast<const YieldStmt*>(stmt)) {
             SemanticType got = s->value ? infer_expr_type(s->value.get()) : SemanticType::void_type();
             if (!allow_yield) {
-                error(s->location, "yield разрешен только в if/match-выражениях");
+                error(s->location, "Yield allowed only in if/match expressions");
             }
             if (yielded != nullptr) {
                 yielded->push_back(got);
@@ -607,7 +606,7 @@ private:
             SemanticType var_type = from_typeref(s->type);
             var_type.is_array = s->is_array;
             if (!is_known_type(var_type) || (!is_builtin_type_name(var_type.name) && !is_visible_symbol(var_type.name))) {
-                error(s->location, "неизвестный тип переменной: " + s->type.name);
+                error(s->location, "Unknown type '{}' for variable with name '{}'", s->type.name, s->name);
             }
 
             if (s->init) {
@@ -619,7 +618,7 @@ private:
                 }
                 if (!is_assignable_to(init_type, assign_to)) {
                     error(s->location,
-                          "несовместимая инициализация: " + type_to_string(assign_to) + " <- " + type_to_string(init_type));
+                          "Incompatible initialization: {} <== {}", type_to_string(assign_to), type_to_string(init_type));
                 }
             }
             for (const auto& e : s->array_init) {
@@ -628,7 +627,7 @@ private:
                 elem.is_array = false;
                 if (!is_assignable_to(item, elem)) {
                     error(s->location,
-                          "несовместимый элемент массива: " + type_to_string(elem) + " <- " + type_to_string(item));
+                          "Incompatible array element type: {} <== {}", type_to_string(elem), type_to_string(item));
                 }
             }
 
@@ -639,7 +638,7 @@ private:
         if (const auto* s = dynamic_cast<const IfStmt*>(stmt)) {
             SemanticType cond = infer_expr_type(s->condition.get());
             if (!is_bool_like(cond)) {
-                error(s->location, "условие if должно быть bool-совместимым");
+                error(s->location, "Invalid if expression: expected bool-compatible expression");
             }
             check_statement(s->then_stmt.get(), allow_yield, yielded);
             check_statement(s->else_stmt.get(), allow_yield, yielded);
@@ -649,7 +648,7 @@ private:
         if (const auto* s = dynamic_cast<const WhileStmt*>(stmt)) {
             SemanticType cond = infer_expr_type(s->condition.get());
             if (!is_bool_like(cond)) {
-                error(s->location, "условие while должно быть bool-совместимым");
+                error(s->location, "Invalid while expression: expected bool-compatible");
             }
             check_statement(s->body.get(), allow_yield, yielded);
             return;
@@ -662,13 +661,13 @@ private:
                 declare_var(s->range_var->name, it_type);
                 SemanticType range_t = infer_expr_type(s->range_expr.get());
                 if (!(range_t.is_array || range_t.is_pointer)) {
-                    warning(s->location, "for-in ожидает массив/указатель в правой части");
+                    warning(s->location, "for-in expects array on right side");
                 }
             } else {
                 check_statement(s->init.get(), false, nullptr);
                 SemanticType cond = s->condition ? infer_expr_type(s->condition.get()) : SemanticType {"bool"};
                 if (!is_bool_like(cond)) {
-                    error(s->location, "условие for должно быть bool-совместимым");
+                    error(s->location, "Invalid for expression: expected bool-compatible expression");
                 }
                 if (s->step) {
                     infer_expr_type(s->step.get());
@@ -684,7 +683,7 @@ private:
         std::vector<SemanticType> yields;
         check_statement(block, true, &yields);
         if (yields.empty()) {
-            error(block->location, "в блоке выражения ожидается yield");
+            error(block->location, "In expression block expects yield expression");
             return SemanticType::error();
         }
         SemanticType current = yields.front();
@@ -697,7 +696,7 @@ private:
                 continue;
             }
             error(block->location,
-                  "несовместимые типы yield в блоке: " + type_to_string(current) + " и " + type_to_string(yields[i]));
+                  "Incompatible types for yields: '{}' and '{}'", type_to_string(current), type_to_string(yields[i]));
             return SemanticType::error();
         }
         return current;
@@ -767,7 +766,7 @@ private:
                 t.name = "<type>";
                 return t;
             }
-            error(e->location, "неизвестный идентификатор: " + e->name);
+            error(e->location, "Unknown identifier: {}", e->name);
             return SemanticType::error();
         }
 
@@ -778,35 +777,35 @@ private:
             }
             if (e->op == "++" || e->op == "--") {
                 if (!is_numeric_type(operand)) {
-                    error(e->location, "оператор " + e->op + " требует числовой операнд");
+                    error(e->location, "Operator {} requires numeric operand", e->op);
                     return SemanticType::error();
                 }
                 return operand;
             }
             if (e->op == "+" || e->op == "-") {
                 if (!is_numeric_type(operand)) {
-                    error(e->location, "унарный " + e->op + " требует числовой операнд");
+                    error(e->location, "Operator {} requires numeric operand", e->op);
                     return SemanticType::error();
                 }
                 return operand;
             }
             if (e->op == "!") {
                 if (!is_bool_like(operand)) {
-                    error(e->location, "оператор ! требует bool-совместимый операнд");
+                    error(e->location, "Operator {} requires bool-compatible operand", e->op);
                     return SemanticType::error();
                 }
                 return SemanticType {"bool"};
             }
             if (e->op == "~") {
                 if (!is_integer_type(operand)) {
-                    error(e->location, "оператор ~ требует целочисленный операнд");
+                    error(e->location, "Operator {} requires integer operand", e->op);
                     return SemanticType::error();
                 }
                 return operand;
             }
             if (e->op == "*") {
                 if (!operand.is_pointer && !operand.is_array) {
-                    error(e->location, "разыменование требует указатель/массив");
+                    error(e->location, "Operator {} requires array/pointer", e->op);
                     return SemanticType::error();
                 }
                 operand.is_array = false;
@@ -832,7 +831,7 @@ private:
                 e->op == "&=" || e->op == "|=" || e->op == "^=" || e->op == "<<=" || e->op == ">>=") {
                 if (!is_assignable_to(rhs, lhs)) {
                     error(e->location,
-                          "несовместимое присваивание: " + type_to_string(lhs) + " <- " + type_to_string(rhs));
+                          "Incompatible assignment: {} <== {}", type_to_string(lhs), type_to_string(rhs));
                     return SemanticType::error();
                 }
                 return lhs;
@@ -840,7 +839,7 @@ private:
 
             if (e->op == "+" || e->op == "-" || e->op == "*" || e->op == "/" || e->op == "%") {
                 if (!is_numeric_type(lhs) || !is_numeric_type(rhs)) {
-                    error(e->location, "арифметический оператор требует числовые операнды");
+                    error(e->location, "Arithmetic operator requires numeric operands");
                     return SemanticType::error();
                 }
                 return numeric_common_type(lhs, rhs);
@@ -848,7 +847,7 @@ private:
 
             if (e->op == "<" || e->op == ">" || e->op == "<=" || e->op == ">=") {
                 if (!((is_numeric_type(lhs) && is_numeric_type(rhs)) || same_type(lhs, rhs))) {
-                    error(e->location, "оператор сравнения требует совместимые типы");
+                    error(e->location, "Comparison operator requires compatible types");
                     return SemanticType::error();
                 }
                 return SemanticType {"bool"};
@@ -856,7 +855,7 @@ private:
 
             if (e->op == "==" || e->op == "!=") {
                 if (!((is_numeric_type(lhs) && is_numeric_type(rhs)) || same_type(lhs, rhs))) {
-                    error(e->location, "оператор равенства требует совместимые типы");
+                    error(e->location, "Equality operator requires compatible types");
                     return SemanticType::error();
                 }
                 return SemanticType {"bool"};
@@ -864,7 +863,7 @@ private:
 
             if (e->op == "&&" || e->op == "||") {
                 if (!is_bool_like(lhs) || !is_bool_like(rhs)) {
-                    error(e->location, "логический оператор требует bool-совместимые операнды");
+                    error(e->location, "Logical operator requires bool-compatible operands");
                     return SemanticType::error();
                 }
                 return SemanticType {"bool"};
@@ -872,7 +871,7 @@ private:
 
             if (e->op == "&" || e->op == "|" || e->op == "^") {
                 if (!is_integer_type(lhs) || !is_integer_type(rhs)) {
-                    error(e->location, "побитовый оператор требует целочисленные операнды");
+                    error(e->location, "Byte-each operator requires integer operands");
                     return SemanticType::error();
                 }
                 return numeric_common_type(lhs, rhs);
@@ -880,7 +879,7 @@ private:
 
             if (e->op == "<<" || e->op == ">>") {
                 if (!is_integer_type(lhs) || !is_integer_type(rhs)) {
-                    error(e->location, "оператор сдвига требует целочисленные операнды");
+                    error(e->location, "Shift operator requires integer types");
                     return SemanticType::error();
                 }
                 return lhs;
@@ -892,7 +891,7 @@ private:
         if (const auto* e = dynamic_cast<const TernaryExpr*>(expr)) {
             SemanticType cond = infer_expr_type(e->condition.get());
             if (!is_bool_like(cond)) {
-                error(e->location, "условие тернарного выражения должно быть bool-совместимым");
+                error(e->location, "Ternary condition should be bool-compatible");
             }
             SemanticType a = infer_expr_type(e->then_expr.get());
             SemanticType b = infer_expr_type(e->else_expr.get());
@@ -902,7 +901,7 @@ private:
             if (is_numeric_type(a) && is_numeric_type(b)) {
                 return numeric_common_type(a, b);
             }
-            error(e->location, "ветви тернарного выражения имеют несовместимые типы");
+            error(e->location, "Ternary nodes contains incompatible types: '{}' and '{}'", type_to_string(a), type_to_string(b));
             return SemanticType::error();
         }
 
@@ -915,7 +914,7 @@ private:
             SemanticType base = obj;
             if (e->via_arrow) {
                 if (!base.is_pointer) {
-                    error(e->location, "оператор -> требует указатель на структуру");
+                    error(e->location, "Access operator '->' requires pointer type");
                     return SemanticType::error();
                 }
                 base.is_pointer = false;
@@ -926,7 +925,7 @@ private:
 
             const auto it = structs_.find(base.name);
             if (it == structs_.end()) {
-                error(e->location, "доступ к полю/методу возможен только у структуры");
+                error(e->location, "<?> Not found structure with name '{}'", base.name);
                 return SemanticType::error();
             }
 
@@ -937,11 +936,11 @@ private:
 
             const auto method = it->second.methods.find(e->member);
             if (method != it->second.methods.end() && !method->second.empty()) {
-                warning(e->location, "метод используется без вызова");
+                warning(e->location, "Maybe you want to call it?");
                 return method->second.front().return_type;
             }
 
-            error(e->location, "неизвестный член структуры: " + e->member);
+            error(e->location, "In structure: '{}': unknown member with name '{}'", it->second.name, e->member);
             return SemanticType::error();
         }
 
@@ -949,10 +948,10 @@ private:
             SemanticType obj = infer_expr_type(e->object.get());
             SemanticType idx = infer_expr_type(e->index.get());
             if (!is_integer_type(idx)) {
-                error(e->location, "индекс должен быть целочисленным");
+                error(e->location, "Index should be integer");
             }
             if (!(obj.is_array || obj.is_pointer)) {
-                error(e->location, "индексация требует массив/указатель");
+                error(e->location, "Indexation requires compatible type");
                 return SemanticType::error();
             }
             obj.is_array = false;
@@ -965,13 +964,13 @@ private:
             SemanticType to = from_typeref(e->target_type);
             if (!is_known_type(to) || (!is_builtin_type_name(to.name) && !active_template_types_.contains(to.name) &&
                                        !is_visible_symbol(to.name))) {
-                error(e->location, "неизвестный целевой тип в type_cast: " + e->target_type.name);
+                error(e->location, "Unknown target type '{}' in type_cast", e->target_type.name);
                 return SemanticType::error();
             }
             if (can_explicit_builtin_cast(from, to) || can_explicit_struct_cast(from, to)) {
                 return to;
             }
-            error(e->location, "недопустимый type_cast: " + type_to_string(from) + " -> " + type_to_string(to));
+            error(e->location, "type_cast from {} to {} is not allowed", type_to_string(from), type_to_string(to));
             return SemanticType::error();
         }
 
@@ -987,20 +986,20 @@ private:
                     if (const FunctionSig* sig = choose_overload(args, *fns)) {
                         return sig->return_type;
                     }
-                    error(e->location, "не найден подходящий overload функции: " + callee_id->name);
+                    error(e->location, "Not found compatible overload for function with name '{}'", callee_id->name);
                     return SemanticType::error();
                 }
                 if (structs_.contains(callee_id->name) && is_visible_symbol(callee_id->name)) {
                     const auto& ctors = structs_[callee_id->name].constructors;
                     if (!ctors.empty() && choose_overload(args, ctors) == nullptr) {
-                        error(e->location, "не найден подходящий конструктор: " + callee_id->name);
+                        error(e->location, "Not found compatible constructor for structure '{}'" + callee_id->name);
                         return SemanticType::error();
                     }
                     SemanticType t;
                     t.name = callee_id->name;
                     return t;
                 }
-                error(e->location, "вызов неизвестной функции/конструктора: " + callee_id->name);
+                error(e->location, "Call to undefined function/constructor: {}", callee_id->name);
                 return SemanticType::error();
             }
 
@@ -1015,10 +1014,10 @@ private:
                                     return sig->return_type;
                                 }
                             }
-                            error(member->location, "не найден подходящий overload функции модуля: " + member->member);
+                            error(member->location, "<?> Not found compatible overload for function from module '{}'", member->member);
                             return SemanticType::error();
                         }
-                        error(member->location, "модуль '" + mod->name + "' не экспортирует символ '" + member->member + "'");
+                        error(member->location, "File '{}' does not export symbol with name '{}'", mod->name, member->member);
                         return SemanticType::error();
                     }
                 }
@@ -1030,7 +1029,7 @@ private:
                 SemanticType base = obj;
                 if (member->via_arrow) {
                     if (!base.is_pointer) {
-                        error(member->location, "оператор -> требует указатель");
+                        error(member->location, "Operator '->' requires pointer type");
                         return SemanticType::error();
                     }
                     base.is_pointer = false;
@@ -1041,36 +1040,36 @@ private:
 
                 const auto it = structs_.find(base.name);
                 if (it == structs_.end()) {
-                    error(member->location, "вызов метода возможен только у структуры");
+                    error(member->location, "Method calling available only for structures");
                     return SemanticType::error();
                 }
                 const auto mit = it->second.methods.find(member->member);
                 if (mit == it->second.methods.end()) {
-                    error(member->location, "неизвестный метод: " + member->member);
+                    error(member->location, "Not found methods with name '{}' in structure with name '{}'", member->member, it->second.name);
                     return SemanticType::error();
                 }
                 if (const FunctionSig* sig = choose_overload(args, mit->second)) {
                     return sig->return_type;
                 }
-                error(member->location, "не найден подходящий overload метода: " + member->member);
+                error(member->location, "Not found compatible method overload with name '{}'", member->member);
                 return SemanticType::error();
             }
 
             SemanticType callee_t = infer_expr_type(e->callee.get());
             (void)callee_t;
-            error(e->location, "вызов поддерживается только для именованных функций/методов/конструкторов");
+            error(e->location, "Call supported only for named methods/constructors");
             return SemanticType::error();
         }
 
         if (const auto* e = dynamic_cast<const IfExpr*>(expr)) {
             SemanticType cond = infer_expr_type(e->condition.get());
             if (!is_bool_like(cond)) {
-                error(e->location, "условие if-выражения должно быть bool-совместимым");
+                error(e->location, "If expression condition should be bool-compatible");
             }
 
             SemanticType then_t = infer_branch_type(e->then_branch);
             if (!e->else_branch.has_value()) {
-                warning(e->location, "if-выражение без else может привести к неопределенному типу");
+                warning(e->location, "If-else assignment should contains else branch");
                 return then_t;
             }
             SemanticType else_t = infer_branch_type(*e->else_branch);
@@ -1081,7 +1080,7 @@ private:
                 return numeric_common_type(then_t, else_t);
             }
             error(e->location,
-                  "ветви if-выражения имеют несовместимые типы: " + type_to_string(then_t) + " и " + type_to_string(else_t));
+                  "If expression nodes contains incompatible types: {} and {}", type_to_string(then_t), type_to_string(else_t));
             return SemanticType::error();
         }
 
@@ -1093,7 +1092,7 @@ private:
                 if (!c.is_default && c.match_expr) {
                     SemanticType case_t = infer_expr_type(c.match_expr.get());
                     if (!((is_numeric_type(case_t) && is_numeric_type(subj)) || same_type(case_t, subj))) {
-                        error(c.location, "тип case-значения не совместим с типом match-выражения");
+                        error(c.location, "Case condition type '{}' is not compatible with match condition type '{}'", type_to_string(case_t), type_to_string(subj));
                     }
                 }
 
@@ -1110,7 +1109,7 @@ private:
             }
 
             if (result_types.empty()) {
-                error(e->location, "match-выражение не содержит возвращающих веток");
+                error(e->location, "Match expression does not contains returning cases");
                 return SemanticType::error();
             }
 
@@ -1123,7 +1122,7 @@ private:
                     current = numeric_common_type(current, result_types[i]);
                     continue;
                 }
-                error(e->location, "ветки match имеют несовместимые типы");
+                error(e->location, "Match cases contains incompatible types");
                 return SemanticType::error();
             }
             return current;

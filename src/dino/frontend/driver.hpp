@@ -1,7 +1,5 @@
 #pragma once
 
-#include "dino/frontend/parser.hpp"
-
 #include <iosfwd>
 #include <optional>
 #include <string>
