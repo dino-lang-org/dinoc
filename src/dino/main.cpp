@@ -33,8 +33,22 @@ int main(int argc, char** argv) {
             options.ast_output_file = std::string(argv[++i]);
             continue;
         }
+        if (arg == "--emit-llvm") {
+            options.emit_llvm = true;
+            continue;
+        }
+        if (arg == "--llvm-out" && i + 1 < argc) {
+            options.emit_llvm = true;
+            options.llvm_output_file = std::string(argv[++i]);
+            continue;
+        }
+        if ((arg == "-o" || arg == "--object-out") && i + 1 < argc) {
+            options.object_output_file = std::string(argv[++i]);
+            continue;
+        }
         if (arg == "-h" || arg == "--help") {
-            std::cout << "dinoc <entry.dino> [--dump-tokens] [--tokens-out <file>] [--dump-ast] [--ast-out <file>]\n";
+            std::cout << "dinoc <entry.dino> [--dump-tokens] [--tokens-out <file>] [--dump-ast] [--ast-out <file>] "
+                         "[--emit-llvm] [--llvm-out <file>] [-o <file>]\n";
             return 0;
         }
         if (!arg.empty() && arg[0] != '-') {
@@ -47,7 +61,7 @@ int main(int argc, char** argv) {
     }
 
     if (options.entry_file.empty()) {
-        std::cerr << "Entry file is required. Example: dinoc examples/main.dino --dump-ast\n";
+        std::cerr << "Entry file is required. Example: dinoc examples/main.dino --emit-llvm --llvm-out out.ll\n";
         return 2;
     }
 

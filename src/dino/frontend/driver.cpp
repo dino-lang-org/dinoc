@@ -1,5 +1,6 @@
 #include "dino/frontend/driver.hpp"
 
+#include "dino/codegen/backend.hpp"
 #include "dino/frontend/dump.hpp"
 #include "dino/frontend/lexer.hpp"
 #include "dino/frontend/sema.hpp"
@@ -76,7 +77,27 @@ int run_frontend(const FrontendOptions& options, std::ostream& out, std::ostream
         write_text(options.ast_output_file, ast_ss.str(), out);
     }
 
-    return (result.ok() && type_result.ok()) ? 0 : 1;
+    if (!(result.ok() && type_result.ok())) {
+        return 1;
+    }
+
+    codegen::BackendOptions backend_options;
+    backend_options.emit_llvm = options.emit_llvm || options.llvm_output_file.has_value();
+    backend_options.llvm_output_file = options.llvm_output_file;
+    backend_options.object_output_file = options.object_output_file;
+
+    codegen::LLVMBackend backend(backend_options);
+    if (!backend.generate(result.units, err)) {
+        return 1;
+    }
+    if (backend_options.emit_llvm && !backend.write_ir(out, err)) {
+        return 1;
+    }
+    if (backend_options.object_output_file.has_value() && !backend.write_object(*backend_options.object_output_file, err)) {
+        return 1;
+    }
+
+    return 0;
 }
 
 } // namespace dino::frontend

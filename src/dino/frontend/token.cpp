@@ -85,6 +85,8 @@ const char* to_string(TokenType type) {
     case TokenType::KwYield: return "KwYield";
     case TokenType::KwReturn: return "KwReturn";
     case TokenType::KwFallthrough: return "KwFallthrough";
+    case TokenType::KwNew: return "KwNew";
+    case TokenType::KwDelete: return "KwDelete";
     case TokenType::KwTemplate: return "KwTemplate";
     case TokenType::KwTypename: return "KwTypename";
     case TokenType::KwThis: return "KwThis";

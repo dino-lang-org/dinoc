@@ -604,6 +604,14 @@ private:
             return;
         }
 
+        if (const auto* s = dynamic_cast<const DeleteStmt*>(stmt)) {
+            SemanticType value_type = infer_expr_type(s->value.get());
+            if (!value_type.is_pointer) {
+                error(s->location, "delete requires a pointer expression");
+            }
+            return;
+        }
+
         if (const auto* s = dynamic_cast<const VarDeclStmt*>(stmt)) {
             SemanticType var_type = from_typeref(s->type);
             var_type.is_array = s->is_array;
@@ -890,23 +898,6 @@ private:
             return SemanticType::error();
         }
 
-        if (const auto* e = dynamic_cast<const TernaryExpr*>(expr)) {
-            SemanticType cond = infer_expr_type(e->condition.get());
-            if (!is_bool_like(cond)) {
-                error(e->location, "Ternary condition should be bool-compatible");
-            }
-            SemanticType a = infer_expr_type(e->then_expr.get());
-            SemanticType b = infer_expr_type(e->else_expr.get());
-            if (same_type(a, b)) {
-                return a;
-            }
-            if (is_numeric_type(a) && is_numeric_type(b)) {
-                return numeric_common_type(a, b);
-            }
-            error(e->location, "Ternary nodes contains incompatible types: '{}' and '{}'", type_to_string(a), type_to_string(b));
-            return SemanticType::error();
-        }
-
         if (const auto* e = dynamic_cast<const MemberExpr*>(expr)) {
             SemanticType obj = infer_expr_type(e->object.get());
             if (obj.is_error) {
@@ -974,6 +965,39 @@ private:
             }
             error(e->location, "type_cast from {} to {} is not allowed", type_to_string(from), type_to_string(to));
             return SemanticType::error();
+        }
+
+        if (const auto* e = dynamic_cast<const NewExpr*>(expr)) {
+            SemanticType allocated = from_typeref(e->target_type);
+            if (!is_known_type(allocated) || (!is_builtin_type_name(allocated.name) && !active_template_types_.contains(allocated.name) &&
+                                              !is_visible_symbol(allocated.name))) {
+                error(e->location, "Unknown target type '{}' in new expression", e->target_type.name);
+                return SemanticType::error();
+            }
+
+            std::vector<SemanticType> args;
+            args.reserve(e->args.size());
+            for (const auto& arg : e->args) {
+                args.push_back(infer_expr_type(arg.get()));
+            }
+
+            if (!is_builtin_type_name(allocated.name)) {
+                const auto it = structs_.find(allocated.name);
+                if (it == structs_.end()) {
+                    error(e->location, "Cannot allocate unknown structure '{}'", allocated.name);
+                    return SemanticType::error();
+                }
+                if (!it->second.constructors.empty() && choose_overload(args, it->second.constructors) == nullptr) {
+                    error(e->location, "Not found compatible constructor for structure '{}'", allocated.name);
+                    return SemanticType::error();
+                }
+            } else if (args.size() > 1) {
+                error(e->location, "Builtin type allocation supports at most one initializer argument");
+                return SemanticType::error();
+            }
+
+            allocated.is_pointer = true;
+            return allocated;
         }
 
         if (const auto* e = dynamic_cast<const CallExpr*>(expr)) {

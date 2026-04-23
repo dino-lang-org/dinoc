@@ -103,6 +103,8 @@ enum class TokenType {
     KwYield,
     KwReturn,
     KwFallthrough,
+    KwNew,
+    KwDelete,
     KwTemplate,
     KwTypename,
     KwThis,

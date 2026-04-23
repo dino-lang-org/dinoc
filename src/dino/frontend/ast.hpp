@@ -79,13 +79,6 @@ struct BinaryExpr : Expr {
     [[nodiscard]] std::string kind() const override { return "BinaryExpr"; }
 };
 
-struct TernaryExpr : Expr {
-    ExprPtr condition;
-    ExprPtr then_expr;
-    ExprPtr else_expr;
-    [[nodiscard]] std::string kind() const override { return "TernaryExpr"; }
-};
-
 struct CallExpr : Expr {
     ExprPtr callee;
     std::vector<ExprPtr> args;
@@ -109,6 +102,12 @@ struct TypeCastExpr : Expr {
     TypeRef target_type;
     ExprPtr value;
     [[nodiscard]] std::string kind() const override { return "TypeCastExpr"; }
+};
+
+struct NewExpr : Expr {
+    TypeRef target_type;
+    std::vector<ExprPtr> args;
+    [[nodiscard]] std::string kind() const override { return "NewExpr"; }
 };
 
 struct BlockStmt;
@@ -151,6 +150,11 @@ struct YieldStmt : Stmt {
 
 struct FallthroughStmt : Stmt {
     [[nodiscard]] std::string kind() const override { return "FallthroughStmt"; }
+};
+
+struct DeleteStmt : Stmt {
+    ExprPtr value;
+    [[nodiscard]] std::string kind() const override { return "DeleteStmt"; }
 };
 
 struct VarDeclStmt : Stmt {

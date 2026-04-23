@@ -480,6 +480,13 @@ private:
             consume_optional_terminator();
             return st;
         }
+        if (match(TokenType::KwDelete)) {
+            auto st = std::make_unique<DeleteStmt>();
+            st->location = previous().location;
+            st->value = parse_expression();
+            expect(TokenType::Semicolon, "Expected ';' after delete expression");
+            return st;
+        }
         if (match(TokenType::KwIf)) {
             return parse_if_stmt(previous().location);
         }
@@ -655,15 +662,16 @@ private:
     ExprPtr parse_ternary() {
         auto cond = parse_logical_or();
         if (match(TokenType::Question)) {
+            error(previous(), "Ternary operator is not supported; use 'if (cond) yield ... else yield ...' instead");
             auto then_e = parse_expression();
+            (void)then_e;
             expect(TokenType::Colon, "Expected ':' in ternary expression");
             auto else_e = parse_expression();
-            auto t = std::make_unique<TernaryExpr>();
-            t->location = cond ? cond->location : current().location;
-            t->condition = std::move(cond);
-            t->then_expr = std::move(then_e);
-            t->else_expr = std::move(else_e);
-            return t;
+            (void)else_e;
+            auto id = std::make_unique<IdentifierExpr>();
+            id->location = cond ? cond->location : previous().location;
+            id->name = "<error>";
+            return id;
         }
         return cond;
     }
@@ -783,6 +791,20 @@ private:
         if (match(TokenType::KwMatch)) {
             return parse_match_expression(previous().location);
         }
+        if (match(TokenType::KwNew)) {
+            auto expr = std::make_unique<NewExpr>();
+            expr->location = previous().location;
+            expr->target_type = parse_type_ref();
+            expect(TokenType::LParen, "Expected '(' after new type");
+            while (!check(TokenType::RParen) && !check(TokenType::EndOfFile)) {
+                expr->args.push_back(parse_expression());
+                if (!match(TokenType::Comma)) {
+                    break;
+                }
+            }
+            expect(TokenType::RParen, "Expected ')' after new arguments");
+            return expr;
+        }
         if (match(TokenType::Number) || match(TokenType::String) || match(TokenType::Character) ||
             match(TokenType::KwTrue) || match(TokenType::KwFalse)) {
             auto lit = std::make_unique<LiteralExpr>();
@@ -878,6 +900,9 @@ private:
                 consume_optional_terminator();
             } else if (check(TokenType::LBrace)) {
                 c.body = parse_block_stmt();
+            } else if (match(TokenType::KwYield)) {
+                c.body = parse_expression();
+                consume_optional_terminator();
             } else {
                 c.body = parse_expression();
                 consume_optional_terminator();

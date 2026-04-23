@@ -272,6 +272,8 @@ TokenType Lexer::identifier_keyword(const std::string& text) const {
         {"yield", TokenType::KwYield},
         {"return", TokenType::KwReturn},
         {"fallthrough", TokenType::KwFallthrough},
+        {"new", TokenType::KwNew},
+        {"delete", TokenType::KwDelete},
         {"template", TokenType::KwTemplate},
         {"typename", TokenType::KwTypename},
         {"this", TokenType::KwThis},

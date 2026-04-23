@@ -6,14 +6,50 @@ project(Dino
         DESCRIPTION "C/C++ -like, statically typed programming language inspired by C, C++, Java and Rust"
 )
 
+find_package(LLVM CONFIG REQUIRED)
+find_package(libxml2 CONFIG REQUIRED)
+
+llvm_map_components_to_libnames(LLVM_LIBS
+        Core 
+        ExecutionEngine 
+        MC 
+        Object
+        OrcJIT
+        RuntimeDyld
+        Support
+        native
+        NVPTX
+#        AllTargetsAsmPrinters
+        AllTargetsCodeGens
+        AllTargetsDisassemblers
+        AllTargetsDescs
+#        AllTargetInfos
+        SelectionDAG
+        AsmPrinter
+        CodeGen
+        InstCombine
+        Instrumentation
+        ScalarOpts
+        TransformUtils
+        Vectorize
+        ipo
+        MCParser
+        BinaryFormat
+        MCDisassembler
+)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(dinoc)
-target_include_directories(dinoc PUBLIC "src")
+target_include_directories(dinoc PUBLIC "src" ${LLVM_INCLUDE_DIRS})
+target_link_libraries(dinoc PRIVATE ${LLVM_LIBS})
 target_sources(dinoc PRIVATE
         "src/dino/main.cpp"
+
+        "src/dino/codegen/backend.cpp"
+
         "src/dino/frontend/token.cpp"
         "src/dino/frontend/lexer.cpp"
         "src/dino/frontend/ast.cpp"

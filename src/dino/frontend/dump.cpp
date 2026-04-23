@@ -59,13 +59,6 @@ void dump_expr(const Expr* expr, std::ostream& os, int level) {
         dump_expr(e->rhs.get(), os, level + 1);
         return;
     }
-    if (const auto* e = dynamic_cast<const TernaryExpr*>(expr)) {
-        os << "\n";
-        dump_expr(e->condition.get(), os, level + 1);
-        dump_expr(e->then_expr.get(), os, level + 1);
-        dump_expr(e->else_expr.get(), os, level + 1);
-        return;
-    }
     if (const auto* e = dynamic_cast<const CallExpr*>(expr)) {
         os << "\n";
         dump_expr(e->callee.get(), os, level + 1);
@@ -88,6 +81,13 @@ void dump_expr(const Expr* expr, std::ostream& os, int level) {
     if (const auto* e = dynamic_cast<const TypeCastExpr*>(expr)) {
         os << " target=" << describe_type(e->target_type) << "\n";
         dump_expr(e->value.get(), os, level + 1);
+        return;
+    }
+    if (const auto* e = dynamic_cast<const NewExpr*>(expr)) {
+        os << " target=" << describe_type(e->target_type) << "\n";
+        for (const auto& arg : e->args) {
+            dump_expr(arg.get(), os, level + 1);
+        }
         return;
     }
     if (const auto* e = dynamic_cast<const IfExpr*>(expr)) {
@@ -146,6 +146,11 @@ void dump_stmt(const Stmt* stmt, std::ostream& os, int level) {
     }
     if (dynamic_cast<const FallthroughStmt*>(stmt)) {
         os << "\n";
+        return;
+    }
+    if (const auto* s = dynamic_cast<const DeleteStmt*>(stmt)) {
+        os << "\n";
+        dump_expr(s->value.get(), os, level + 1);
         return;
     }
     if (const auto* s = dynamic_cast<const VarDeclStmt*>(stmt)) {
