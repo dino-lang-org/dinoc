@@ -1,286 +1,302 @@
 #pragma once
 
-#include "dino/frontend/token.hpp"
-
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
-#include <vector>
 #include <variant>
+#include <vector>
+
+#include "dino/frontend/token.hpp"
 
 namespace dino::frontend {
 
-struct Expr;
-struct Stmt;
-struct Decl;
-struct TranslationUnit;
+	struct Expr;
+	struct Stmt;
+	struct Decl;
+	struct TranslationUnit;
 
-using ExprPtr = std::unique_ptr<Expr>;
-using StmtPtr = std::unique_ptr<Stmt>;
-using DeclPtr = std::unique_ptr<Decl>;
+	using ExprPtr = std::unique_ptr<Expr>;
+	using StmtPtr = std::unique_ptr<Stmt>;
+	using DeclPtr = std::unique_ptr<Decl>;
 
-struct Node {
-    SourceLocation location;
-    virtual ~Node() = default;
-};
+	struct TemplateParam {
+		std::string name;
+		bool is_pack = false;
+	};
 
-struct Expr : Node {
-    [[nodiscard]] virtual std::string kind() const = 0;
-};
+	struct Node {
+		SourceLocation location;
+		virtual ~Node() = default;
+	};
 
-struct Stmt : Node {
-    [[nodiscard]] virtual std::string kind() const = 0;
-};
+	struct Expr : Node {
+		[[nodiscard]] virtual std::string kind() const = 0;
+	};
 
-struct Decl : Node {
-    AccessModifier access = AccessModifier::Private;
-    std::vector<std::string> template_params;
-    [[nodiscard]] virtual std::string kind() const = 0;
-    [[nodiscard]] virtual std::optional<std::string> declared_name() const { return std::nullopt; }
-};
+	struct Stmt : Node {
+		[[nodiscard]] virtual std::string kind() const = 0;
+	};
 
-struct TypeRef {
-    std::string name;
-    bool is_const = false;
-    bool is_nonull = false;
-    bool is_pointer = false;
-    bool is_reference = false;
-    bool variadic = false;
-};
+	struct Decl : Node {
+		AccessModifier access = AccessModifier::Private;
+		std::vector<TemplateParam> template_params;
+		[[nodiscard]] virtual std::string kind() const = 0;
+		[[nodiscard]] virtual std::optional<std::string> declared_name() const { return std::nullopt; }
+	};
 
-struct Parameter {
-    TypeRef type;
-    std::string name;
-};
+	struct TypeRef {
+		std::string name;
+		bool is_const = false;
+		bool is_nonull = false;
+		bool is_pointer = false;
+		bool is_reference = false;
+		bool variadic = false;
+	};
 
-struct FunctionAttributes {
-    bool is_extern = false;
-    bool no_mangle = false;
+	struct Parameter {
+		TypeRef type;
+		std::string name;
+		bool is_pack = false;
+	};
 
-    [[nodiscard]] bool uses_c_abi() const { return is_extern || no_mangle; }
-};
+	struct FunctionAttributes {
+		bool is_extern = false;
+		bool no_mangle = false;
 
-struct LiteralExpr : Expr {
-    std::string value;
-    std::string literal_kind;
-    [[nodiscard]] std::string kind() const override { return "LiteralExpr"; }
-};
+		[[nodiscard]] bool uses_c_abi() const { return is_extern || no_mangle; }
+	};
 
-struct IdentifierExpr : Expr {
-    std::string name;
-    [[nodiscard]] std::string kind() const override { return "IdentifierExpr"; }
-};
+	struct LiteralExpr : Expr {
+		std::string value;
+		std::string literal_kind;
+		[[nodiscard]] std::string kind() const override { return "LiteralExpr"; }
+	};
 
-struct UnaryExpr : Expr {
-    std::string op;
-    ExprPtr operand;
-    bool postfix = false;
-    [[nodiscard]] std::string kind() const override { return "UnaryExpr"; }
-};
+	struct IdentifierExpr : Expr {
+		std::string name;
+		[[nodiscard]] std::string kind() const override { return "IdentifierExpr"; }
+	};
 
-struct BinaryExpr : Expr {
-    std::string op;
-    ExprPtr lhs;
-    ExprPtr rhs;
-    [[nodiscard]] std::string kind() const override { return "BinaryExpr"; }
-};
+	struct UnaryExpr : Expr {
+		std::string op;
+		ExprPtr operand;
+		bool postfix = false;
+		[[nodiscard]] std::string kind() const override { return "UnaryExpr"; }
+	};
 
-struct CallExpr : Expr {
-    ExprPtr callee;
-    std::vector<ExprPtr> args;
-    [[nodiscard]] std::string kind() const override { return "CallExpr"; }
-};
+	struct BinaryExpr : Expr {
+		std::string op;
+		ExprPtr lhs;
+		ExprPtr rhs;
+		[[nodiscard]] std::string kind() const override { return "BinaryExpr"; }
+	};
 
-struct MemberExpr : Expr {
-    ExprPtr object;
-    std::string member;
-    bool via_arrow = false;
-    [[nodiscard]] std::string kind() const override { return "MemberExpr"; }
-};
+	struct CallExpr : Expr {
+		ExprPtr callee;
+		std::vector<ExprPtr> args;
+		[[nodiscard]] std::string kind() const override { return "CallExpr"; }
+	};
 
-struct IndexExpr : Expr {
-    ExprPtr object;
-    ExprPtr index;
-    [[nodiscard]] std::string kind() const override { return "IndexExpr"; }
-};
+	struct MemberExpr : Expr {
+		ExprPtr object;
+		std::string member;
+		bool via_arrow = false;
+		[[nodiscard]] std::string kind() const override { return "MemberExpr"; }
+	};
 
-struct TypeCastExpr : Expr {
-    TypeRef target_type;
-    ExprPtr value;
-    [[nodiscard]] std::string kind() const override { return "TypeCastExpr"; }
-};
+	struct IndexExpr : Expr {
+		ExprPtr object;
+		ExprPtr index;
+		[[nodiscard]] std::string kind() const override { return "IndexExpr"; }
+	};
 
-struct NewExpr : Expr {
-    ExprPtr placement;
-    TypeRef target_type;
-    bool is_array = false;
-    ExprPtr array_size;
-    std::vector<ExprPtr> args;
-    [[nodiscard]] std::string kind() const override { return "NewExpr"; }
-};
+	struct TypeCastExpr : Expr {
+		TypeRef target_type;
+		ExprPtr value;
+		[[nodiscard]] std::string kind() const override { return "TypeCastExpr"; }
+	};
 
-struct DestructorCallExpr : Expr {
-    ExprPtr object;
-    std::string type_name;
-    bool via_arrow = false;
-    [[nodiscard]] std::string kind() const override { return "DestructorCallExpr"; }
-};
+	struct NewExpr : Expr {
+		ExprPtr placement;
+		TypeRef target_type;
+		bool is_array = false;
+		ExprPtr array_size;
+		std::vector<ExprPtr> args;
+		[[nodiscard]] std::string kind() const override { return "NewExpr"; }
+	};
 
-struct BlockStmt;
+	struct DestructorCallExpr : Expr {
+		ExprPtr object;
+		std::string type_name;
+		bool via_arrow = false;
+		[[nodiscard]] std::string kind() const override { return "DestructorCallExpr"; }
+	};
 
-struct IfExpr : Expr {
-    ExprPtr condition;
-    std::variant<ExprPtr, std::unique_ptr<BlockStmt>> then_branch;
-    std::optional<std::variant<ExprPtr, std::unique_ptr<BlockStmt>>> else_branch;
-    [[nodiscard]] std::string kind() const override { return "IfExpr"; }
-};
+	struct BlockStmt;
 
-struct MatchCase {
-    bool is_default = false;
-    ExprPtr match_expr;
-    std::variant<ExprPtr, std::unique_ptr<BlockStmt>> body;
-    bool fallthrough = false;
-    SourceLocation location;
-};
+	struct IfExpr : Expr {
+		ExprPtr condition;
+		std::variant<ExprPtr, std::unique_ptr<BlockStmt>> then_branch;
+		std::optional<std::variant<ExprPtr, std::unique_ptr<BlockStmt>>> else_branch;
+		[[nodiscard]] std::string kind() const override { return "IfExpr"; }
+	};
 
-struct MatchExpr : Expr {
-    ExprPtr subject;
-    std::vector<MatchCase> cases;
-    [[nodiscard]] std::string kind() const override { return "MatchExpr"; }
-};
+	struct MatchCase {
+		bool is_default = false;
+		ExprPtr match_expr;
+		std::variant<ExprPtr, std::unique_ptr<BlockStmt>> body;
+		bool fallthrough = false;
+		SourceLocation location;
+	};
 
-struct ExprStmt : Stmt {
-    ExprPtr expr;
-    [[nodiscard]] std::string kind() const override { return "ExprStmt"; }
-};
+	struct MatchExpr : Expr {
+		ExprPtr subject;
+		std::vector<MatchCase> cases;
+		[[nodiscard]] std::string kind() const override { return "MatchExpr"; }
+	};
 
-struct ReturnStmt : Stmt {
-    ExprPtr value;
-    [[nodiscard]] std::string kind() const override { return "ReturnStmt"; }
-};
+	struct ExprStmt : Stmt {
+		ExprPtr expr;
+		[[nodiscard]] std::string kind() const override { return "ExprStmt"; }
+	};
 
-struct YieldStmt : Stmt {
-    ExprPtr value;
-    [[nodiscard]] std::string kind() const override { return "YieldStmt"; }
-};
+	struct ReturnStmt : Stmt {
+		ExprPtr value;
+		[[nodiscard]] std::string kind() const override { return "ReturnStmt"; }
+	};
 
-struct FallthroughStmt : Stmt {
-    [[nodiscard]] std::string kind() const override { return "FallthroughStmt"; }
-};
+	struct YieldStmt : Stmt {
+		ExprPtr value;
+		[[nodiscard]] std::string kind() const override { return "YieldStmt"; }
+	};
 
-struct DeleteStmt : Stmt {
-    ExprPtr value;
-    [[nodiscard]] std::string kind() const override { return "DeleteStmt"; }
-};
+	struct FallthroughStmt : Stmt {
+		[[nodiscard]] std::string kind() const override { return "FallthroughStmt"; }
+	};
 
-struct VarDeclStmt : Stmt {
-    TypeRef type;
-    std::string name;
-    bool is_array = false;
-    ExprPtr init;
-    std::vector<ExprPtr> array_init;
-    bool needs_nonull_check = false;
-    [[nodiscard]] std::string kind() const override { return "VarDeclStmt"; }
-};
+	struct DeleteStmt : Stmt {
+		ExprPtr value;
+		[[nodiscard]] std::string kind() const override { return "DeleteStmt"; }
+	};
 
-struct BlockStmt : Stmt {
-    std::vector<StmtPtr> statements;
-    [[nodiscard]] std::string kind() const override { return "BlockStmt"; }
-};
+	struct VarDeclStmt : Stmt {
+		TypeRef type;
+		std::string name;
+		bool is_array = false;
+		ExprPtr init;
+		std::vector<ExprPtr> array_init;
+		bool needs_nonull_check = false;
+		[[nodiscard]] std::string kind() const override { return "VarDeclStmt"; }
+	};
 
-struct IfStmt : Stmt {
-    ExprPtr condition;
-    StmtPtr then_stmt;
-    StmtPtr else_stmt;
-    [[nodiscard]] std::string kind() const override { return "IfStmt"; }
-};
+	struct BlockStmt : Stmt {
+		std::vector<StmtPtr> statements;
+		[[nodiscard]] std::string kind() const override { return "BlockStmt"; }
+	};
 
-struct WhileStmt : Stmt {
-    ExprPtr condition;
-    StmtPtr body;
-    [[nodiscard]] std::string kind() const override { return "WhileStmt"; }
-};
+	struct IfStmt : Stmt {
+		ExprPtr condition;
+		StmtPtr then_stmt;
+		StmtPtr else_stmt;
+		[[nodiscard]] std::string kind() const override { return "IfStmt"; }
+	};
 
-struct ForStmt : Stmt {
-    StmtPtr init;
-    ExprPtr condition;
-    ExprPtr step;
-    std::optional<Parameter> range_var;
-    ExprPtr range_expr;
-    StmtPtr body;
-    [[nodiscard]] std::string kind() const override { return "ForStmt"; }
-};
+	struct WhileStmt : Stmt {
+		ExprPtr condition;
+		StmtPtr body;
+		[[nodiscard]] std::string kind() const override { return "WhileStmt"; }
+	};
 
-struct IncludeDecl : Decl {
-    std::string include_path;
-    std::string resolved_path;
-    [[nodiscard]] std::string kind() const override { return "IncludeDecl"; }
-};
+	struct ForStmt : Stmt {
+		StmtPtr init;
+		ExprPtr condition;
+		ExprPtr step;
+		std::optional<Parameter> range_var;
+		ExprPtr range_expr;
+		StmtPtr body;
+		[[nodiscard]] std::string kind() const override { return "ForStmt"; }
+	};
 
-struct FunctionDecl : Decl {
-    FunctionAttributes attributes;
-    TypeRef return_type;
-    std::string name;
-    std::vector<Parameter> parameters;
-    std::unique_ptr<BlockStmt> body;
-    [[nodiscard]] std::string kind() const override { return "FunctionDecl"; }
-    [[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
-};
+	struct IncludeDecl : Decl {
+		std::string include_path;
+		std::string resolved_path;
+		[[nodiscard]] std::string kind() const override { return "IncludeDecl"; }
+	};
 
-struct FieldDecl : Node {
-    AccessModifier access = AccessModifier::Private;
-    bool is_static = false;
-    TypeRef type;
-    std::vector<std::string> names;
-};
+	struct FunctionDecl : Decl {
+		FunctionAttributes attributes;
+		TypeRef return_type;
+		std::string name;
+		std::vector<Parameter> parameters;
+		std::unique_ptr<BlockStmt> body;
+		[[nodiscard]] std::string kind() const override { return "FunctionDecl"; }
+		[[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
+	};
 
-struct ConstructorDecl : Node {
-    AccessModifier access = AccessModifier::Private;
-    std::string name;
-    std::vector<Parameter> parameters;
-    std::unique_ptr<BlockStmt> body;
-};
+	struct GlobalVarDecl : Decl {
+		bool is_extern = false;
+		TypeRef type;
+		std::string name;
+		bool is_array = false;
+		ExprPtr init;
+		std::vector<ExprPtr> array_init;
+		[[nodiscard]] std::string kind() const override { return "GlobalVarDecl"; }
+		[[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
+	};
 
-struct DestructorDecl : Node {
-    AccessModifier access = AccessModifier::Private;
-    std::string name;
-    std::unique_ptr<BlockStmt> body;
-};
+	struct FieldDecl : Node {
+		AccessModifier access = AccessModifier::Private;
+		bool is_static = false;
+		TypeRef type;
+		std::vector<std::string> names;
+	};
 
-struct MethodDecl : Node {
-    AccessModifier access = AccessModifier::Private;
-    FunctionAttributes attributes;
-    bool is_static = false;
-    TypeRef return_type;
-    std::string name;
-    std::vector<Parameter> parameters;
-    std::unique_ptr<BlockStmt> body;
-};
+	struct ConstructorDecl : Node {
+		AccessModifier access = AccessModifier::Private;
+		std::string name;
+		std::vector<Parameter> parameters;
+		std::unique_ptr<BlockStmt> body;
+	};
 
-struct ConversionDecl : Node {
-    AccessModifier access = AccessModifier::Private;
-    TypeRef target_type;
-    std::unique_ptr<BlockStmt> body;
-};
+	struct DestructorDecl : Node {
+		AccessModifier access = AccessModifier::Private;
+		std::string name;
+		std::unique_ptr<BlockStmt> body;
+	};
 
-struct StructDecl : Decl {
-    std::string name;
-    std::vector<FieldDecl> fields;
-    std::vector<ConstructorDecl> constructors;
-    std::vector<DestructorDecl> destructors;
-    std::vector<MethodDecl> methods;
-    std::vector<ConversionDecl> conversions;
-    [[nodiscard]] std::string kind() const override { return "StructDecl"; }
-    [[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
-};
+	struct MethodDecl : Node {
+		AccessModifier access = AccessModifier::Private;
+		FunctionAttributes attributes;
+		bool is_static = false;
+		TypeRef return_type;
+		std::string name;
+		std::vector<Parameter> parameters;
+		std::unique_ptr<BlockStmt> body;
+	};
 
-struct TranslationUnit {
-    std::string file_path;
-    std::vector<DeclPtr> declarations;
-    std::unordered_set<std::string> exported_symbols;
-    std::unordered_set<std::string> local_symbols;
-};
+	struct ConversionDecl : Node {
+		AccessModifier access = AccessModifier::Private;
+		TypeRef target_type;
+		std::unique_ptr<BlockStmt> body;
+	};
+
+	struct StructDecl : Decl {
+		std::string name;
+		std::vector<FieldDecl> fields;
+		std::vector<ConstructorDecl> constructors;
+		std::vector<DestructorDecl> destructors;
+		std::vector<MethodDecl> methods;
+		std::vector<ConversionDecl> conversions;
+		[[nodiscard]] std::string kind() const override { return "StructDecl"; }
+		[[nodiscard]] std::optional<std::string> declared_name() const override { return name; }
+	};
+
+	struct TranslationUnit {
+		std::string file_path;
+		std::vector<DeclPtr> declarations;
+		std::unordered_set<std::string> exported_symbols;
+		std::unordered_set<std::string> local_symbols;
+	};
 
 } // namespace dino::frontend
-

@@ -1,103 +1,127 @@
 #include "dino/frontend/driver.hpp"
 
-#include "dino/codegen/backend.hpp"
-#include "dino/frontend/dump.hpp"
-#include "dino/frontend/lexer.hpp"
-#include "dino/frontend/sema.hpp"
-
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 
+#include "dino/codegen/backend.hpp"
+#include "dino/frontend/dump.hpp"
+#include "dino/frontend/lexer.hpp"
+#include "dino/frontend/sema.hpp"
+#include "dino/frontend/target.hpp"
+
 namespace dino::frontend {
-namespace {
+	namespace {
 
-std::string read_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return {};
-    }
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
-}
+		std::string read_file(const std::string& path) {
+			std::ifstream in(path, std::ios::binary);
+			if (!in) {
+				return {};
+			}
+			std::ostringstream ss;
+			ss << in.rdbuf();
+			return ss.str();
+		}
 
-void write_text(const std::optional<std::string>& path, const std::string& text, std::ostream& fallback) {
-    if (!path.has_value()) {
-        fallback << text;
-        return;
-    }
-    std::ofstream out(*path, std::ios::binary);
-    out << text;
-}
+		void write_text(const std::optional<std::string>& path, const std::string& text, std::ostream& fallback) {
+			if (!path.has_value()) {
+				fallback << text;
+				return;
+			}
+			std::ofstream out(*path, std::ios::binary);
+			out << text;
+		}
 
-} // namespace
+	} // namespace
 
-int run_frontend(const FrontendOptions& options, std::ostream& out, std::ostream& err) {
-    ParserDriver driver;
-    ParseResult result = driver.parse_entry(options.entry_file);
-    TypeCheckResult type_result;
-    if (result.ok()) {
-        type_result = type_check(result.units);
-    }
+	int run_frontend(const FrontendOptions& options, std::ostream& out, std::ostream& err) {
+		TargetInfo target = detect_host_target();
+		if (options.target_os.has_value()) {
+			if (!is_supported_target_os(*options.target_os)) {
+				err << "Unsupported target os: " << *options.target_os << "\n";
+				return 2;
+			}
+			target.os = *options.target_os;
+		}
+		if (options.target_arch.has_value()) {
+			if (!is_supported_target_arch(*options.target_arch)) {
+				err << "Unsupported target arch: " << *options.target_arch << "\n";
+				return 2;
+			}
+			target.arch = *options.target_arch;
+		}
+		if (options.target_build_type.has_value()) {
+			if (!is_supported_target_build_type(*options.target_build_type)) {
+				err << "Unsupported target build type: " << *options.target_build_type << "\n";
+				return 2;
+			}
+			target.build_type = *options.target_build_type;
+		}
 
-    for (const auto& e : result.errors) {
-        err << e.location.file << ":" << e.location.line << ":" << e.location.column << ": error: " << e.text << "\n";
-    }
-    for (const auto& w : result.warnings) {
-        err << w.location.file << ":" << w.location.line << ":" << w.location.column << ": warning: " << w.text << "\n";
-    }
-    for (const auto& e : type_result.errors) {
-        err << e.location.file << ":" << e.location.line << ":" << e.location.column << ": error: " << e.text << "\n";
-    }
-    for (const auto& w : type_result.warnings) {
-        err << w.location.file << ":" << w.location.line << ":" << w.location.column << ": warning: " << w.text << "\n";
-    }
+		ParserDriver driver(target);
+		ParseResult result = driver.parse_entry(options.entry_file);
+		TypeCheckResult type_result;
+		if (result.ok()) {
+			type_result = type_check(result.units);
+		}
 
-    if (options.dump_tokens) {
-        std::ostringstream token_ss;
-        for (const auto& [path, unit] : result.units) {
-            const std::string src = read_file(path);
-            Lexer lexer(path, src);
-            auto tokens = lexer.tokenize();
-            dump_tokens(tokens, token_ss);
-            token_ss << "\n";
-        }
-        write_text(options.token_output_file, token_ss.str(), out);
-    }
+		for (const auto& e: result.errors) {
+			err << e.location.file << ":" << e.location.line << ":" << e.location.column << ": error: " << e.text << "\n";
+		}
+		for (const auto& w: result.warnings) {
+			err << w.location.file << ":" << w.location.line << ":" << w.location.column << ": warning: " << w.text << "\n";
+		}
+		for (const auto& e: type_result.errors) {
+			err << e.location.file << ":" << e.location.line << ":" << e.location.column << ": error: " << e.text << "\n";
+		}
+		for (const auto& w: type_result.warnings) {
+			err << w.location.file << ":" << w.location.line << ":" << w.location.column << ": warning: " << w.text << "\n";
+		}
 
-    if (options.dump_ast) {
-        std::vector<const TranslationUnit*> units;
-        units.reserve(result.units.size());
-        for (const auto& [_, unit] : result.units) {
-            units.push_back(unit.get());
-        }
-        std::ostringstream ast_ss;
-        dump_all_asts(units, ast_ss);
-        write_text(options.ast_output_file, ast_ss.str(), out);
-    }
+		if (options.dump_tokens) {
+			std::ostringstream token_ss;
+			for (const auto& [path, unit]: result.units) {
+				const std::string src = read_file(path);
+				Lexer lexer(path, src);
+				auto tokens = lexer.tokenize();
+				dump_tokens(tokens, token_ss);
+				token_ss << "\n";
+			}
+			write_text(options.token_output_file, token_ss.str(), out);
+		}
 
-    if (!(result.ok() && type_result.ok())) {
-        return 1;
-    }
+		if (options.dump_ast) {
+			std::vector<const TranslationUnit*> units;
+			units.reserve(result.units.size());
+			for (const auto& [_, unit]: result.units) {
+				units.push_back(unit.get());
+			}
+			std::ostringstream ast_ss;
+			dump_all_asts(units, ast_ss);
+			write_text(options.ast_output_file, ast_ss.str(), out);
+		}
 
-    codegen::BackendOptions backend_options;
-    backend_options.emit_llvm = options.emit_llvm || options.llvm_output_file.has_value();
-    backend_options.llvm_output_file = options.llvm_output_file;
-    backend_options.object_output_file = options.object_output_file;
+		if (!(result.ok() && type_result.ok())) {
+			return 1;
+		}
 
-    codegen::LLVMBackend backend(backend_options);
-    if (!backend.generate(result.units, err)) {
-        return 1;
-    }
-    if (backend_options.emit_llvm && !backend.write_ir(out, err)) {
-        return 1;
-    }
-    if (backend_options.object_output_file.has_value() && !backend.write_object(*backend_options.object_output_file, err)) {
-        return 1;
-    }
+		codegen::BackendOptions backend_options;
+		backend_options.emit_llvm = options.emit_llvm || options.llvm_output_file.has_value();
+		backend_options.llvm_output_file = options.llvm_output_file;
+		backend_options.object_output_file = options.object_output_file;
 
-    return 0;
-}
+		codegen::LLVMBackend backend(backend_options);
+		if (!backend.generate(result.units, err)) {
+			return 1;
+		}
+		if (backend_options.emit_llvm && !backend.write_ir(out, err)) {
+			return 1;
+		}
+		if (backend_options.object_output_file.has_value() && !backend.write_object(*backend_options.object_output_file, err)) {
+			return 1;
+		}
+
+		return 0;
+	}
 
 } // namespace dino::frontend

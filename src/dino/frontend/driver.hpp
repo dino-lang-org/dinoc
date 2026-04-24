@@ -6,17 +6,20 @@
 
 namespace dino::frontend {
 
-struct FrontendOptions {
-    std::string entry_file;
-    bool dump_tokens = false;
-    bool dump_ast = false;
-    bool emit_llvm = false;
-    std::optional<std::string> token_output_file;
-    std::optional<std::string> ast_output_file;
-    std::optional<std::string> llvm_output_file;
-    std::optional<std::string> object_output_file;
-};
+	struct FrontendOptions {
+		std::string entry_file;
+		bool dump_tokens = false;
+		bool dump_ast = false;
+		bool emit_llvm = false;
+		std::optional<std::string> token_output_file;
+		std::optional<std::string> ast_output_file;
+		std::optional<std::string> llvm_output_file;
+		std::optional<std::string> object_output_file;
+		std::optional<std::string> target_os;
+		std::optional<std::string> target_arch;
+		std::optional<std::string> target_build_type;
+	};
 
-int run_frontend(const FrontendOptions& options, std::ostream& out, std::ostream& err);
+	int run_frontend(const FrontendOptions& options, std::ostream& out, std::ostream& err);
 
 } // namespace dino::frontend

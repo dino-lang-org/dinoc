@@ -50,6 +50,7 @@ target_sources(dinoc PRIVATE
 
         "src/dino/frontend/token.cpp"
         "src/dino/frontend/lexer.cpp"
+        "src/dino/frontend/target.cpp"
         "src/dino/frontend/parser.cpp"
         "src/dino/frontend/sema.cpp"
         "src/dino/frontend/dump.cpp"
