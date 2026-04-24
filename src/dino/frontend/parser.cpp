@@ -344,6 +344,12 @@ namespace dino::frontend {
 								}
 								f.names.push_back(n->lexeme);
 							}
+							if (match(TokenType::Assign)) {
+								if (f.names.size() != 1) {
+									error(current(), "Field initializer is allowed only for a single field declaration");
+								}
+								f.init = parse_expression();
+							}
 							expect(TokenType::Semicolon, "Expected ';' after field/method");
 							if (!member_attributes.has_req || member_attributes.req_matches) {
 								decl->fields.push_back(std::move(f));
@@ -860,8 +866,12 @@ namespace dino::frontend {
 					return false;
 				}
 
-				if (!(match(TokenType::Assign) || match(TokenType::Equal))) {
-					error(current(), "Expected '=' in req comparison");
+				bool negate = false;
+				if (match(TokenType::Assign) || match(TokenType::Equal)) {
+				} else if (match(TokenType::NotEqual)) {
+					negate = true;
+				} else {
+					error(current(), "Expected '=' or '!=' in req comparison");
 					return false;
 				}
 
@@ -875,20 +885,20 @@ namespace dino::frontend {
 						error(*value, "Unknown req os value '{}'", value->lexeme);
 						return false;
 					}
-					return value->lexeme == target_.os;
+					return negate ? value->lexeme != target_.os : value->lexeme == target_.os;
 				}
 				if (name->lexeme == "arch") {
 					if (!(value->lexeme == "x86" || value->lexeme == "x86_64" || value->lexeme == "arm" || value->lexeme == "arm64")) {
 						error(*value, "Unknown req arch value '{}'", value->lexeme);
 						return false;
 					}
-					return value->lexeme == target_.arch;
+					return negate ? value->lexeme != target_.arch : value->lexeme == target_.arch;
 				}
 				if (!(value->lexeme == "debug" || value->lexeme == "release")) {
 					error(*value, "Unknown req build_type value '{}'", value->lexeme);
 					return false;
 				}
-				return value->lexeme == target_.build_type;
+				return negate ? value->lexeme != target_.build_type : value->lexeme == target_.build_type;
 			}
 
 			ExprPtr parse_assignment() {
@@ -1275,7 +1285,7 @@ namespace dino::frontend {
 
 			void synchronize_struct() {
 				while (!check(TokenType::EndOfFile)) {
-					if (check(TokenType::Semicolon) || check(TokenType::RBrace)) {
+					if (match(TokenType::Semicolon) || check(TokenType::RBrace)) {
 						return;
 					}
 					advance();

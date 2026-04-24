@@ -250,6 +250,7 @@ namespace dino::frontend {
 		bool is_static = false;
 		TypeRef type;
 		std::vector<std::string> names;
+		ExprPtr init;
 	};
 
 	struct ConstructorDecl : Node {

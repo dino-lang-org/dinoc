@@ -325,6 +325,9 @@ namespace dino::frontend {
 						os << n << " ";
 					}
 					os << "\n";
+					if (f.init) {
+						dump_expr(f.init.get(), os, 3);
+					}
 				}
 				for (const auto& c: st->constructors) {
 					os << "    Ctor access=" << to_string(c.access) << " name=" << c.name << "\n";

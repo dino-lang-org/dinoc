@@ -59,6 +59,7 @@ namespace dino::codegen {
 			SemanticType type;
 			size_t index = 0;
 			bool is_static = false;
+			const frontend::FieldDecl* decl = nullptr;
 			llvm::GlobalVariable* global = nullptr;
 		};
 
@@ -605,6 +606,7 @@ namespace dino::codegen {
 									field_info.name = name;
 									field_info.type = from_typeref(field.type);
 									field_info.is_static = field.is_static;
+									field_info.decl = &field;
 									if (field.is_static) {
 										info.static_fields[name] = field_info;
 									} else {
@@ -1187,11 +1189,25 @@ namespace dino::codegen {
 				for (auto& [owner_name, info]: structs_) {
 					for (auto& [field_name, field]: info.static_fields) {
 						const std::string global_name = std::format("field {}.{}", owner_name, field_name);
+						llvm::Constant* initializer = llvm::dyn_cast<llvm::Constant>(zero_value(field.type));
+						if (field.decl != nullptr && field.decl->init != nullptr) {
+							llvm::Constant* init_value = emit_constant_expression(field.decl->init.get());
+							if (init_value == nullptr) {
+								errors_.push_back(std::format("Static field '{}.{}' requires a constant initializer", owner_name, field_name));
+							} else {
+								init_value = cast_constant(init_value, infer_expr_type(field.decl->init.get()), field.type);
+								if (init_value == nullptr) {
+									errors_.push_back(std::format("Static field '{}.{}' requires a constant initializer", owner_name, field_name));
+								} else {
+									initializer = init_value;
+								}
+							}
+						}
 						field.global = new llvm::GlobalVariable(module_,
 																llvm_type(field.type),
-																false,
+																field.type.is_const,
 																llvm::GlobalValue::InternalLinkage,
-																llvm::dyn_cast<llvm::Constant>(zero_value(field.type)),
+																initializer,
 																global_name);
 					}
 				}

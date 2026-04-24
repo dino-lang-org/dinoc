@@ -425,6 +425,21 @@ namespace dino::frontend {
 											   !is_visible_symbol(ft.name) && ft.name != st.name)) {
 						error(f.location, "In structure '{}': unknown type '{}' for field with name '{}'", st.name, f.type.name, ft.name);
 					}
+					if (f.is_static && ft.is_const && f.init == nullptr) {
+						error(f.location, "Static const field in structure '{}' requires an initializer", st.name);
+					}
+					if (!f.is_static && f.init != nullptr) {
+						error(f.location, "Field initializers are currently supported only for static fields");
+					}
+					if (f.init != nullptr) {
+						SemanticType init_type = infer_expr_type(f.init.get());
+						if (!is_assignable_to(init_type, ft)) {
+							error(f.location,
+								  "Incompatible field initialization: {} <== {}",
+								  type_to_string(ft),
+								  type_to_string(init_type));
+						}
+					}
 				}
 
 				for (const auto& ctor: st.constructors) {
