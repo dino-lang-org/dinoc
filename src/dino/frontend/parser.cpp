@@ -59,7 +59,39 @@ public:
     }
 
 private:
+    FunctionAttributes parse_function_attributes() {
+        FunctionAttributes attributes;
+        while (match(TokenType::Hash)) {
+            expect(TokenType::LBracket, "Expected '[' after '#'");
+            auto name = expect(TokenType::Identifier, "Expected attribute name inside '#[...]'");
+            expect(TokenType::RBracket, "Expected ']' after attribute name");
+            if (!name) {
+                continue;
+            }
+            if (name->lexeme == "extern") {
+                attributes.is_extern = true;
+            } else if (name->lexeme == "no_mangle") {
+                attributes.no_mangle = true;
+            } else {
+                error(*name, "Unknown attribute '{}'", name->lexeme);
+            }
+        }
+        return attributes;
+    }
+
+    std::unique_ptr<BlockStmt> parse_optional_function_body() {
+        if (check(TokenType::LBrace)) {
+            return parse_block_stmt();
+        }
+        if (match(TokenType::Semicolon)) {
+            return nullptr;
+        }
+        error(current(), "Expected function body or ';'");
+        return nullptr;
+    }
+
     DeclPtr parse_declaration() {
+        FunctionAttributes attributes = parse_function_attributes();
         std::vector<std::string> template_params;
         while (match(TokenType::KwTemplate)) {
             auto parsed = parse_template_params();
@@ -74,6 +106,9 @@ private:
         }
 
         if (check(TokenType::At)) {
+            if (attributes.uses_c_abi()) {
+                error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on functions and methods");
+            }
             auto include = parse_include_decl(access);
             if (include) {
                 include->template_params = std::move(template_params);
@@ -82,6 +117,9 @@ private:
         }
 
         if (match(TokenType::KwStruct)) {
+            if (attributes.uses_c_abi()) {
+                error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on functions and methods");
+            }
             auto decl = parse_struct_decl(access);
             if (decl) {
                 decl->template_params = std::move(template_params);
@@ -90,7 +128,7 @@ private:
         }
 
         if (looks_like_function_decl()) {
-            auto decl = parse_function_decl(access);
+            auto decl = parse_function_decl(access, attributes);
             if (decl) {
                 decl->template_params = std::move(template_params);
             }
@@ -160,14 +198,22 @@ private:
         expect(TokenType::LBrace, "Expected '{' after field declaration");
 
         while (!check(TokenType::RBrace) && !check(TokenType::EndOfFile)) {
+            FunctionAttributes member_attributes = parse_function_attributes();
             AccessModifier member_access = AccessModifier::Private;
             if (match(TokenType::KwPublic)) {
                 member_access = AccessModifier::Public;
             } else if (match(TokenType::KwPrivate)) {
                 member_access = AccessModifier::Private;
             }
+            const bool member_static = match(TokenType::KwStatic);
 
             if (check(TokenType::Tilde)) {
+                if (member_static) {
+                    error(current(), "Keyword 'static' is not allowed on destructors");
+                }
+                if (member_attributes.uses_c_abi()) {
+                    error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+                }
                 if (auto destructor = parse_destructor_decl(member_access, decl->name); destructor) {
                     decl->destructors.push_back(std::move(*destructor));
                 }
@@ -175,6 +221,12 @@ private:
             }
 
             if (check(TokenType::Identifier) && current().lexeme == decl->name && peek().type == TokenType::LParen) {
+                if (member_static) {
+                    error(current(), "Keyword 'static' is not allowed on constructors");
+                }
+                if (member_attributes.uses_c_abi()) {
+                    error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+                }
                 if (auto constructor = parse_constructor_decl(member_access, decl->name); constructor) {
                     decl->constructors.push_back(std::move(*constructor));
                 }
@@ -184,6 +236,12 @@ private:
             if (looks_like_method_or_field()) {
                 TypeRef type = parse_type_ref();
                 if (check(TokenType::LParen)) {
+                    if (member_static) {
+                        error(current(), "Keyword 'static' is not allowed on conversion operators");
+                    }
+                    if (member_attributes.uses_c_abi()) {
+                        error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+                    }
                     ConversionDecl conv;
                     conv.location = current().location;
                     conv.access = member_access;
@@ -209,20 +267,24 @@ private:
                     MethodDecl m;
                     m.location = id->location;
                     m.access = member_access;
+                    m.attributes = member_attributes;
+                    m.is_static = member_static;
                     m.return_type = std::move(type);
                     m.name = id->lexeme;
                     m.parameters = parse_parameter_list();
-                    m.body = parse_block_stmt();
-                    if (!m.body) {
-                        synchronize_struct();
-                        continue;
+                    m.body = parse_optional_function_body();
+                    if (m.body) {
+                        inject_nonull_param_checks(m.body, m.parameters);
                     }
-                    inject_nonull_param_checks(m.body, m.parameters);
                     decl->methods.push_back(std::move(m));
                 } else {
+                    if (member_attributes.uses_c_abi()) {
+                        error(*id, "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+                    }
                     FieldDecl f;
                     f.location = id->location;
                     f.access = member_access;
+                    f.is_static = member_static;
                     f.type = std::move(type);
                     f.names.push_back(id->lexeme);
                     while (match(TokenType::Comma)) {
@@ -294,7 +356,7 @@ private:
         return dtor;
     }
 
-    std::unique_ptr<FunctionDecl> parse_function_decl(AccessModifier access) {
+    std::unique_ptr<FunctionDecl> parse_function_decl(AccessModifier access, const FunctionAttributes& attributes) {
         TypeRef ret = parse_type_ref();
         auto name = expect(TokenType::Identifier, "Expected function name");
         if (!name) {
@@ -303,15 +365,15 @@ private:
 
         auto decl = std::make_unique<FunctionDecl>();
         decl->access = access;
+        decl->attributes = attributes;
         decl->location = name->location;
         decl->return_type = std::move(ret);
         decl->name = name->lexeme;
         decl->parameters = parse_parameter_list();
-        decl->body = parse_block_stmt();
-        if (!decl->body) {
-            return nullptr;
+        decl->body = parse_optional_function_body();
+        if (decl->body) {
+            inject_nonull_param_checks(decl->body, decl->parameters);
         }
-        inject_nonull_param_checks(decl->body, decl->parameters);
         return decl;
     }
 
@@ -320,6 +382,12 @@ private:
         expect(TokenType::LParen, "Expected '('");
         while (!check(TokenType::RParen) && !check(TokenType::EndOfFile)) {
             Parameter p;
+            if (match(TokenType::Ellipsis)) {
+                p.type.name = "void";
+                p.type.variadic = true;
+                params.push_back(std::move(p));
+                break;
+            }
             p.type = parse_type_ref();
             if (match(TokenType::Ellipsis)) {
                 p.type.variadic = true;
@@ -739,6 +807,21 @@ private:
             }
             if (match(TokenType::Dot) || match(TokenType::Arrow)) {
                 const bool via_arrow = previous().type == TokenType::Arrow;
+                if (match(TokenType::Tilde)) {
+                    auto type_name = expect(TokenType::Identifier, "Expected type name after '~' in destructor call");
+                    if (!type_name) {
+                        return expr;
+                    }
+                    expect(TokenType::LParen, "Expected '(' after destructor name");
+                    expect(TokenType::RParen, "Expected ')' after destructor call");
+                    auto dtor = std::make_unique<DestructorCallExpr>();
+                    dtor->location = type_name->location;
+                    dtor->object = std::move(expr);
+                    dtor->type_name = type_name->lexeme;
+                    dtor->via_arrow = via_arrow;
+                    expr = std::move(dtor);
+                    continue;
+                }
                 auto member = expect(TokenType::Identifier, "Expected field/method name");
                 if (!member) {
                     return expr;
@@ -794,15 +877,25 @@ private:
         if (match(TokenType::KwNew)) {
             auto expr = std::make_unique<NewExpr>();
             expr->location = previous().location;
-            expr->target_type = parse_type_ref();
-            expect(TokenType::LParen, "Expected '(' after new type");
-            while (!check(TokenType::RParen) && !check(TokenType::EndOfFile)) {
-                expr->args.push_back(parse_expression());
-                if (!match(TokenType::Comma)) {
-                    break;
-                }
+            if (match(TokenType::LParen)) {
+                expr->placement = parse_expression();
+                expect(TokenType::RParen, "Expected ')' after placement new address");
             }
-            expect(TokenType::RParen, "Expected ')' after new arguments");
+            expr->target_type = parse_type_ref();
+            if (match(TokenType::LBracket)) {
+                expr->is_array = true;
+                expr->array_size = parse_expression();
+                expect(TokenType::RBracket, "Expected ']' after new array size");
+            }
+            if (match(TokenType::LParen)) {
+                while (!check(TokenType::RParen) && !check(TokenType::EndOfFile)) {
+                    expr->args.push_back(parse_expression());
+                    if (!match(TokenType::Comma)) {
+                        break;
+                    }
+                }
+                expect(TokenType::RParen, "Expected ')' after new arguments");
+            }
             return expr;
         }
         if (match(TokenType::Number) || match(TokenType::String) || match(TokenType::Character) ||

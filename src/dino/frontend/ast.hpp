@@ -54,6 +54,13 @@ struct Parameter {
     std::string name;
 };
 
+struct FunctionAttributes {
+    bool is_extern = false;
+    bool no_mangle = false;
+
+    [[nodiscard]] bool uses_c_abi() const { return is_extern || no_mangle; }
+};
+
 struct LiteralExpr : Expr {
     std::string value;
     std::string literal_kind;
@@ -105,9 +112,19 @@ struct TypeCastExpr : Expr {
 };
 
 struct NewExpr : Expr {
+    ExprPtr placement;
     TypeRef target_type;
+    bool is_array = false;
+    ExprPtr array_size;
     std::vector<ExprPtr> args;
     [[nodiscard]] std::string kind() const override { return "NewExpr"; }
+};
+
+struct DestructorCallExpr : Expr {
+    ExprPtr object;
+    std::string type_name;
+    bool via_arrow = false;
+    [[nodiscard]] std::string kind() const override { return "DestructorCallExpr"; }
 };
 
 struct BlockStmt;
@@ -202,6 +219,7 @@ struct IncludeDecl : Decl {
 };
 
 struct FunctionDecl : Decl {
+    FunctionAttributes attributes;
     TypeRef return_type;
     std::string name;
     std::vector<Parameter> parameters;
@@ -212,6 +230,7 @@ struct FunctionDecl : Decl {
 
 struct FieldDecl : Node {
     AccessModifier access = AccessModifier::Private;
+    bool is_static = false;
     TypeRef type;
     std::vector<std::string> names;
 };
@@ -231,6 +250,8 @@ struct DestructorDecl : Node {
 
 struct MethodDecl : Node {
     AccessModifier access = AccessModifier::Private;
+    FunctionAttributes attributes;
+    bool is_static = false;
     TypeRef return_type;
     std::string name;
     std::vector<Parameter> parameters;

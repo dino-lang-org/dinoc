@@ -11,6 +11,7 @@ const char* to_string(TokenType type) {
     case TokenType::String: return "String";
     case TokenType::Character: return "Character";
     case TokenType::At: return "At";
+    case TokenType::Hash: return "Hash";
     case TokenType::Comma: return "Comma";
     case TokenType::Dot: return "Dot";
     case TokenType::Colon: return "Colon";
@@ -74,6 +75,7 @@ const char* to_string(TokenType type) {
     case TokenType::KwVoid: return "KwVoid";
     case TokenType::KwBool: return "KwBool";
     case TokenType::KwStruct: return "KwStruct";
+    case TokenType::KwStatic: return "KwStatic";
     case TokenType::KwIf: return "KwIf";
     case TokenType::KwElse: return "KwElse";
     case TokenType::KwWhile: return "KwWhile";

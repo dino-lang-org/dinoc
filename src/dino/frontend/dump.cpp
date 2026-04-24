@@ -6,6 +6,17 @@
 namespace dino::frontend {
 namespace {
 
+std::string describe_attributes(const FunctionAttributes& attributes) {
+    std::string out;
+    if (attributes.is_extern) {
+        out += " #[extern]";
+    }
+    if (attributes.no_mangle) {
+        out += " #[no_mangle]";
+    }
+    return out;
+}
+
 void indent(std::ostream& os, int level) {
     for (int i = 0; i < level; ++i) {
         os << "  ";
@@ -84,10 +95,30 @@ void dump_expr(const Expr* expr, std::ostream& os, int level) {
         return;
     }
     if (const auto* e = dynamic_cast<const NewExpr*>(expr)) {
-        os << " target=" << describe_type(e->target_type) << "\n";
+        os << " target=" << describe_type(e->target_type);
+        if (e->placement) {
+            os << " placement";
+        }
+        if (e->is_array) {
+            os << " array\n";
+            if (e->placement) {
+                dump_expr(e->placement.get(), os, level + 1);
+            }
+            dump_expr(e->array_size.get(), os, level + 1);
+        } else {
+            os << "\n";
+            if (e->placement) {
+                dump_expr(e->placement.get(), os, level + 1);
+            }
+        }
         for (const auto& arg : e->args) {
             dump_expr(arg.get(), os, level + 1);
         }
+        return;
+    }
+    if (const auto* e = dynamic_cast<const DestructorCallExpr*>(expr)) {
+        os << " type=" << e->type_name << (e->via_arrow ? " via->" : " via.") << "\n";
+        dump_expr(e->object.get(), os, level + 1);
         return;
     }
     if (const auto* e = dynamic_cast<const IfExpr*>(expr)) {
@@ -243,14 +274,17 @@ void dump_ast(const TranslationUnit& unit, std::ostream& os) {
             continue;
         }
         if (const auto* fn = dynamic_cast<const FunctionDecl*>(decl.get())) {
-            os << " name=" << fn->name << " returns=" << describe_type(fn->return_type) << "\n";
-            dump_stmt(fn->body.get(), os, 2);
+            os << " name=" << fn->name << " returns=" << describe_type(fn->return_type) << describe_attributes(fn->attributes) << "\n";
+            if (fn->body) {
+                dump_stmt(fn->body.get(), os, 2);
+            }
             continue;
         }
         if (const auto* st = dynamic_cast<const StructDecl*>(decl.get())) {
             os << " name=" << st->name << "\n";
             for (const auto& f : st->fields) {
-                os << "    Field access=" << to_string(f.access) << " type=" << describe_type(f.type) << " names=";
+                os << "    Field access=" << to_string(f.access) << " type=" << describe_type(f.type)
+                   << (f.is_static ? " static" : "") << " names=";
                 for (const auto& n : f.names) {
                     os << n << " ";
                 }
@@ -266,8 +300,10 @@ void dump_ast(const TranslationUnit& unit, std::ostream& os) {
             }
             for (const auto& m : st->methods) {
                 os << "    Method access=" << to_string(m.access) << " name=" << m.name << " returns=" << describe_type(m.return_type)
-                   << "\n";
-                dump_stmt(m.body.get(), os, 3);
+                   << (m.is_static ? " static" : "") << describe_attributes(m.attributes) << "\n";
+                if (m.body) {
+                    dump_stmt(m.body.get(), os, 3);
+                }
             }
             for (const auto& c : st->conversions) {
                 os << "    Conversion access=" << to_string(c.access) << " target=" << describe_type(c.target_type) << "\n";

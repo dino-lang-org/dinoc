@@ -58,6 +58,8 @@ struct FieldInfo {
     std::string name;
     SemanticType type;
     size_t index = 0;
+    bool is_static = false;
+    llvm::GlobalVariable* global = nullptr;
 };
 
 enum class FunctionKind {
@@ -77,6 +79,9 @@ struct FunctionInfo {
     std::vector<SemanticType> params;
     bool variadic = false;
     bool external_only = false;
+    bool is_extern = false;
+    bool no_mangle = false;
+    bool is_static_method = false;
     const TranslationUnit* owner_unit = nullptr;
     const FunctionDecl* function = nullptr;
     const MethodDecl* method = nullptr;
@@ -90,6 +95,7 @@ struct StructInfo {
     const StructDecl* decl = nullptr;
     std::vector<FieldInfo> fields;
     std::unordered_map<std::string, size_t> field_indices;
+    std::unordered_map<std::string, FieldInfo> static_fields;
     std::vector<FunctionInfo*> constructors;
     FunctionInfo* destructor = nullptr;
     std::unordered_map<std::string, std::vector<FunctionInfo*>> methods;
@@ -108,12 +114,12 @@ struct Scope {
     std::vector<std::string> destruction_order;
 };
 
-struct YieldContext {
-    llvm::AllocaInst* slot = nullptr;
-    llvm::BasicBlock* merge_block = nullptr;
-    SemanticType type;
-    size_t scope_depth = 0;
-};
+    struct YieldContext {
+        llvm::AllocaInst* slot = nullptr;
+        llvm::BasicBlock* merge_block = nullptr;
+        SemanticType type;
+        size_t scope_depth = 0;
+    };
 
 SemanticType from_typeref(const TypeRef& type) {
     SemanticType result;
@@ -229,6 +235,7 @@ public:
         }
         declare_structs();
         define_struct_layouts();
+        declare_static_fields();
         declare_functions();
         if (!errors_.empty()) {
             flush_errors();
@@ -366,6 +373,16 @@ private:
         return llvm::Function::Create(type, llvm::Function::ExternalLinkage, "free", module_);
     }
 
+    llvm::StructType* heap_header_type() {
+        llvm::StructType* header = llvm::StructType::getTypeByName(context_, "dino.heap.header");
+        if (header != nullptr) {
+            return header;
+        }
+        header = llvm::StructType::create(context_, "dino.heap.header");
+        header->setBody({llvm::Type::getInt64Ty(context_)}, false);
+        return header;
+    }
+
     bool type_has_destructor(const SemanticType& type) const {
         if (type.is_pointer || type.is_reference || type.is_array) {
             return false;
@@ -380,6 +397,55 @@ private:
         }
         const StructInfo& info = structs_.at(type.name);
         builder_.CreateCall(info.destructor->llvm_function, {address});
+    }
+
+    llvm::Value* allocate_heap_block(const SemanticType& allocated_type, llvm::Value* element_count) {
+        llvm::Type* element_llvm_type = llvm_type(allocated_type);
+        const llvm::DataLayout& layout = module_.getDataLayout();
+        const uint64_t element_size = layout.getTypeAllocSize(element_llvm_type);
+        const uint64_t header_size = layout.getTypeAllocSize(heap_header_type());
+
+        llvm::Value* count64 = builder_.CreateIntCast(element_count, llvm::Type::getInt64Ty(context_), false, "heap.count");
+        llvm::Value* bytes = builder_.CreateMul(count64,
+                                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), element_size),
+                                                "heap.payload.bytes");
+        bytes = builder_.CreateAdd(bytes,
+                                   llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), header_size),
+                                   "heap.total.bytes");
+
+        llvm::Value* raw = builder_.CreateCall(ensure_malloc(), {bytes}, "new.raw");
+        llvm::Value* header_ptr = builder_.CreateBitCast(raw, llvm::PointerType::get(context_, 0), "heap.header.ptr");
+        llvm::Value* count_ptr = builder_.CreateStructGEP(heap_header_type(), header_ptr, 0, "heap.count.ptr");
+        builder_.CreateStore(count64, count_ptr);
+
+        llvm::Value* payload_raw = builder_.CreateInBoundsGEP(llvm::Type::getInt8Ty(context_),
+                                                              builder_.CreateBitCast(raw, llvm::PointerType::get(context_, 0)),
+                                                              llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), header_size),
+                                                              "heap.payload.raw");
+        return builder_.CreateBitCast(payload_raw, llvm::PointerType::get(context_, 0), "new.ptr");
+    }
+
+    llvm::Value* heap_count_from_payload(llvm::Value* payload) {
+        const llvm::DataLayout& layout = module_.getDataLayout();
+        const uint64_t header_size = layout.getTypeAllocSize(heap_header_type());
+        llvm::Value* payload_raw = builder_.CreateBitCast(payload, llvm::PointerType::get(context_, 0), "payload.raw");
+        llvm::Value* header_raw = builder_.CreateInBoundsGEP(llvm::Type::getInt8Ty(context_),
+                                                             payload_raw,
+                                                             llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), -static_cast<int64_t>(header_size)),
+                                                             "header.raw");
+        llvm::Value* header_ptr = builder_.CreateBitCast(header_raw, llvm::PointerType::get(context_, 0), "header.ptr");
+        llvm::Value* count_ptr = builder_.CreateStructGEP(heap_header_type(), header_ptr, 0, "heap.count.ptr");
+        return builder_.CreateLoad(llvm::Type::getInt64Ty(context_), count_ptr, "heap.count");
+    }
+
+    llvm::Value* heap_raw_from_payload(llvm::Value* payload) {
+        const llvm::DataLayout& layout = module_.getDataLayout();
+        const uint64_t header_size = layout.getTypeAllocSize(heap_header_type());
+        llvm::Value* payload_raw = builder_.CreateBitCast(payload, llvm::PointerType::get(context_, 0), "payload.raw");
+        return builder_.CreateInBoundsGEP(llvm::Type::getInt8Ty(context_),
+                                          payload_raw,
+                                          llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), -static_cast<int64_t>(header_size)),
+                                          "heap.raw");
     }
 
     void emit_scope_cleanups(size_t scope_index) {
@@ -423,9 +489,14 @@ private:
                             FieldInfo field_info;
                             field_info.name = name;
                             field_info.type = from_typeref(field.type);
-                            field_info.index = field_index++;
-                            info.field_indices[name] = info.fields.size();
-                            info.fields.push_back(field_info);
+                            field_info.is_static = field.is_static;
+                            if (field.is_static) {
+                                info.static_fields[name] = field_info;
+                            } else {
+                                field_info.index = field_index++;
+                                info.field_indices[name] = info.fields.size();
+                                info.fields.push_back(field_info);
+                            }
                         }
                     }
                     structs_[struct_decl->name] = std::move(info);
@@ -443,11 +514,12 @@ private:
                     info->return_type = from_typeref(function_decl->return_type);
                     info->owner_unit = unit.get();
                     info->function = function_decl;
-                    info->external_only = !function_decl->template_params.empty();
+                    info->external_only = !function_decl->template_params.empty() || function_decl->body == nullptr;
+                    info->is_extern = function_decl->attributes.is_extern;
+                    info->no_mangle = function_decl->attributes.no_mangle;
                     for (const auto& parameter : function_decl->parameters) {
                         if (parameter.type.variadic) {
                             info->variadic = true;
-                            info->external_only = true;
                             continue;
                         }
                         SemanticType param_type = from_typeref(parameter.type);
@@ -492,10 +564,13 @@ private:
                     info->return_type = from_typeref(method_decl.return_type);
                     info->owner_unit = unit.get();
                     info->method = &method_decl;
+                    info->external_only = method_decl.body == nullptr;
+                    info->is_extern = method_decl.attributes.is_extern;
+                    info->no_mangle = method_decl.attributes.no_mangle;
+                    info->is_static_method = method_decl.is_static;
                     for (const auto& parameter : method_decl.parameters) {
                         if (parameter.type.variadic) {
                             info->variadic = true;
-                            info->external_only = true;
                             continue;
                         }
                         info->params.push_back(from_typeref(parameter.type));
@@ -544,15 +619,24 @@ private:
     }
 
     std::string mangle_free_function(const FunctionInfo& function) const {
+        if (function.is_extern || function.no_mangle) {
+            return function.name;
+        }
         return std::format("{} {}({})", type_to_string(function.return_type), function.name, join_params(function.params));
     }
 
     std::string mangle_method(const FunctionInfo& function) const {
-        return std::format("method {} {}.{}({})",
-                           type_to_string(function.return_type),
-                           function.owner,
-                           function.name,
-                           join_params(function.params));
+        if (function.is_extern || function.no_mangle) {
+            return std::format("{}_{}", function.owner, function.name);
+        }
+        std::vector<SemanticType> mangled_params;
+        if (!function.is_static_method) {
+            SemanticType self_type {function.owner};
+            self_type.is_pointer = true;
+            mangled_params.push_back(self_type);
+        }
+        mangled_params.insert(mangled_params.end(), function.params.begin(), function.params.end());
+        return std::format("method {}.{}({})", function.owner, function.name, join_params(mangled_params));
     }
 
     std::string mangle_constructor(const FunctionInfo& function) const {
@@ -564,7 +648,7 @@ private:
     }
 
     std::string mangle_conversion(const FunctionInfo& function) const {
-        return std::format("conv {} {}.type_cast()", type_to_string(function.return_type), function.owner);
+        return std::format("conv {} {}()", type_to_string(function.return_type), function.owner);
     }
 
     llvm::Type* llvm_type(const SemanticType& type, bool decay_array = false) {
@@ -647,6 +731,20 @@ private:
         }
     }
 
+    void declare_static_fields() {
+        for (auto& [owner_name, info] : structs_) {
+            for (auto& [field_name, field] : info.static_fields) {
+                const std::string global_name = std::format("field {}.{}", owner_name, field_name);
+                field.global = new llvm::GlobalVariable(module_,
+                                                        llvm_type(field.type),
+                                                        false,
+                                                        llvm::GlobalValue::InternalLinkage,
+                                                        llvm::dyn_cast<llvm::Constant>(zero_value(field.type)),
+                                                        global_name);
+            }
+        }
+    }
+
     void define_struct_layouts() {
         for (auto& [name, info] : structs_) {
             std::vector<llvm::Type*> field_types;
@@ -661,7 +759,7 @@ private:
     void declare_functions() {
         for (auto& function : owned_functions_) {
             std::vector<llvm::Type*> params;
-            if (function->kind == FunctionKind::Method || function->kind == FunctionKind::Conversion ||
+            if ((function->kind == FunctionKind::Method && !function->is_static_method) || function->kind == FunctionKind::Conversion ||
                 function->kind == FunctionKind::Destructor) {
                 params.push_back(llvm::PointerType::get(context_, 0));
             }
@@ -675,6 +773,9 @@ private:
                                                              llvm::Function::ExternalLinkage,
                                                              function->llvm_name,
                                                              module_);
+            if (function->is_extern || function->no_mangle) {
+                function->llvm_function->setCallingConv(llvm::CallingConv::C);
+            }
         }
     }
 
@@ -788,18 +889,20 @@ private:
         const StructInfo& owner = structs_.at(info.owner);
         begin_function(info);
         current_unit_ = info.owner_unit;
-        llvm::Argument* this_arg = current_function_->getArg(0);
-        this_arg->setName("this");
-        current_self_ = this_arg;
         current_struct_ = &owner;
-        declare_variable("this", VariableInfo {SemanticType {info.owner, false, false, true}, this_arg, false});
+        if (!info.is_static_method) {
+            llvm::Argument* this_arg = current_function_->getArg(0);
+            this_arg->setName("this");
+            current_self_ = this_arg;
+            declare_variable("this", VariableInfo {SemanticType {info.owner, false, false, true}, this_arg, false});
+        }
 
         std::vector<std::string> names;
         names.reserve(info.method->parameters.size());
         for (const auto& parameter : info.method->parameters) {
             names.push_back(parameter.name);
         }
-        bind_parameters(info.params, names, 1);
+        bind_parameters(info.params, names, info.is_static_method ? 0 : 1);
         emit_statement(info.method->body.get());
         finish_function(info);
     }
@@ -846,6 +949,14 @@ private:
         return true;
     }
 
+    std::optional<std::string> referenced_struct_name(const Expr* expr) const {
+        const auto* identifier = dynamic_cast<const IdentifierExpr*>(expr);
+        if (identifier == nullptr || !structs_.contains(identifier->name)) {
+            return std::nullopt;
+        }
+        return identifier->name;
+    }
+
     const FieldInfo* lookup_field(const StructInfo& owner, const std::string& name) const {
         if (const auto found = owner.field_indices.find(name); found != owner.field_indices.end()) {
             return &owner.fields[found->second];
@@ -886,6 +997,12 @@ private:
                 return variable->type;
             }
             if (current_struct_ != nullptr) {
+                if (const auto static_field = current_struct_->static_fields.find(identifier->name);
+                    static_field != current_struct_->static_fields.end()) {
+                    return static_field->second.type;
+                }
+            }
+            if (current_struct_ != nullptr && current_self_ != nullptr) {
                 if (const FieldInfo* field = lookup_field(*current_struct_, identifier->name)) {
                     return field->type;
                 }
@@ -932,6 +1049,23 @@ private:
             return lhs;
         }
         if (const auto* member = dynamic_cast<const MemberExpr*>(expr)) {
+            if (auto static_owner = referenced_struct_name(member->object.get())) {
+                const auto found = structs_.find(*static_owner);
+                if (found != structs_.end()) {
+                    if (const auto static_field = found->second.static_fields.find(member->member);
+                        static_field != found->second.static_fields.end()) {
+                        return static_field->second.type;
+                    }
+                    if (const auto methods = found->second.methods.find(member->member); methods != found->second.methods.end()) {
+                        for (FunctionInfo* function : methods->second) {
+                            if (function != nullptr && function->is_static_method) {
+                                return function->return_type;
+                            }
+                        }
+                    }
+                }
+                return SemanticType {"<error>", false, false, false, false, false, 0, true};
+            }
             SemanticType object_type = infer_expr_type(member->object.get());
             if (member->via_arrow) {
                 object_type.is_pointer = false;
@@ -960,6 +1094,9 @@ private:
             SemanticType type = from_typeref(alloc->target_type);
             type.is_pointer = true;
             return type;
+        }
+        if (dynamic_cast<const DestructorCallExpr*>(expr)) {
+            return SemanticType {"void"};
         }
         if (const auto* call = dynamic_cast<const CallExpr*>(expr)) {
             CallResolution resolution = resolve_call(call);
@@ -1057,6 +1194,12 @@ private:
             if (VariableInfo* variable = lookup_variable(identifier->name)) {
                 return variable->address;
             }
+            if (current_struct_ != nullptr) {
+                if (const auto static_field = current_struct_->static_fields.find(identifier->name);
+                    static_field != current_struct_->static_fields.end()) {
+                    return static_field->second.global;
+                }
+            }
             if (current_struct_ != nullptr && current_self_ != nullptr) {
                 if (const FieldInfo* field = lookup_field(*current_struct_, identifier->name)) {
                     return builder_.CreateStructGEP(current_struct_->llvm_type, current_self_, field->index, identifier->name + ".addr");
@@ -1064,6 +1207,17 @@ private:
             }
         }
         if (const auto* member = dynamic_cast<const MemberExpr*>(expr)) {
+            if (auto static_owner = referenced_struct_name(member->object.get())) {
+                const auto found = structs_.find(*static_owner);
+                if (found != structs_.end()) {
+                    if (const auto static_field = found->second.static_fields.find(member->member);
+                        static_field != found->second.static_fields.end()) {
+                        return static_field->second.global;
+                    }
+                }
+                errors_.push_back(std::format("Static member '{}.{}' is not an lvalue", *static_owner, member->member));
+                return nullptr;
+            }
             SemanticType object_type = infer_expr_type(member->object.get());
             llvm::Value* base_address = nullptr;
             if (member->via_arrow) {
@@ -1135,6 +1289,12 @@ private:
             if (const VariableInfo* variable = lookup_variable(identifier->name)) {
                 return load_variable(*variable, identifier->name);
             }
+            if (current_struct_ != nullptr) {
+                if (const auto static_field = current_struct_->static_fields.find(identifier->name);
+                    static_field != current_struct_->static_fields.end()) {
+                    return builder_.CreateLoad(llvm_type(static_field->second.type), static_field->second.global, identifier->name);
+                }
+            }
             if (current_struct_ != nullptr && current_self_ != nullptr) {
                 if (const FieldInfo* field = lookup_field(*current_struct_, identifier->name)) {
                     llvm::Value* address = builder_.CreateStructGEP(current_struct_->llvm_type, current_self_, field->index, identifier->name + ".addr");
@@ -1174,6 +1334,9 @@ private:
         }
         if (const auto* alloc = dynamic_cast<const NewExpr*>(expr)) {
             return emit_new_expression(*alloc);
+        }
+        if (const auto* destructor = dynamic_cast<const DestructorCallExpr*>(expr)) {
+            return emit_destructor_expression(*destructor);
         }
         if (const auto* if_expr = dynamic_cast<const IfExpr*>(expr)) {
             return emit_if_expression(*if_expr);
@@ -1512,15 +1675,44 @@ private:
         return cast_value(value, from, to, false);
     }
 
+    llvm::Value* emit_destructor_expression(const DestructorCallExpr& expr) {
+        SemanticType object_type = infer_expr_type(expr.object.get());
+        SemanticType base_type = object_type;
+        llvm::Value* address = nullptr;
+
+        if (expr.via_arrow) {
+            address = emit_expression(expr.object.get());
+            base_type.is_pointer = false;
+            base_type.is_reference = false;
+        } else {
+            address = ensure_address(expr.object.get(), object_type);
+            base_type.is_reference = false;
+        }
+
+        if (address == nullptr) {
+            errors_.push_back(std::format("Unable to emit destructor call for type '{}'", expr.type_name));
+            return nullptr;
+        }
+
+        emit_destructor_call(base_type, address);
+        return nullptr;
+    }
+
     llvm::Value* emit_new_expression(const NewExpr& expr) {
         SemanticType allocated_type = from_typeref(expr.target_type);
-        llvm::Type* storage_type = llvm_type(allocated_type);
-        const llvm::DataLayout& layout = module_.getDataLayout();
-        uint64_t size = layout.getTypeAllocSize(storage_type);
-        llvm::Value* raw = builder_.CreateCall(ensure_malloc(),
-                                               {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), size)},
-                                               "new.raw");
-        llvm::Value* storage = builder_.CreateBitCast(raw, llvm::PointerType::get(context_, 0), "new.ptr");
+        llvm::Value* element_count = expr.is_array ? emit_expression(expr.array_size.get())
+                                                   : llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), 1);
+        if (element_count == nullptr) {
+            return nullptr;
+        }
+        if (!element_count->getType()->isIntegerTy(64)) {
+            element_count = builder_.CreateIntCast(element_count, llvm::Type::getInt64Ty(context_), false, "new.count.cast");
+        }
+        llvm::Value* storage =
+            expr.placement ? emit_expression(expr.placement.get()) : allocate_heap_block(allocated_type, element_count);
+        if (storage == nullptr) {
+            return nullptr;
+        }
 
         if (const auto struct_it = structs_.find(allocated_type.name); struct_it != structs_.end()) {
             std::vector<SemanticType> arg_types;
@@ -1534,23 +1726,87 @@ private:
                 return storage;
             }
 
-            std::vector<llvm::Value*> args;
-            args.reserve(expr.args.size());
+            std::vector<llvm::Value*> ctor_args;
+            ctor_args.reserve(expr.args.size());
             for (size_t i = 0; i < expr.args.size(); ++i) {
                 llvm::Value* value = emit_expression(expr.args[i].get());
                 value = cast_value(value, arg_types[i], ctor->params[i], true);
-                args.push_back(value);
+                ctor_args.push_back(value);
             }
-            llvm::Value* constructed = builder_.CreateCall(ctor->llvm_function, args, "new.value");
-            builder_.CreateStore(constructed, storage);
+
+            if (!expr.is_array) {
+                llvm::Value* constructed = builder_.CreateCall(ctor->llvm_function, ctor_args, "new.value");
+                builder_.CreateStore(constructed, storage);
+                return storage;
+            }
+
+            llvm::Function* function = current_function_;
+            llvm::BasicBlock* cond_block = llvm::BasicBlock::Create(context_, "new.array.struct.cond", function);
+            llvm::BasicBlock* body_block = llvm::BasicBlock::Create(context_, "new.array.struct.body", function);
+            llvm::BasicBlock* end_block = llvm::BasicBlock::Create(context_, "new.array.struct.end", function);
+            llvm::AllocaInst* index_slot = create_entry_alloca(current_function_, llvm::Type::getInt64Ty(context_), "new.array.index");
+            builder_.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0), index_slot);
+            builder_.CreateBr(cond_block);
+
+            builder_.SetInsertPoint(cond_block);
+            llvm::Value* index = builder_.CreateLoad(llvm::Type::getInt64Ty(context_), index_slot, "new.array.index");
+            llvm::Value* condition = builder_.CreateICmpULT(index, element_count, "new.array.more");
+            builder_.CreateCondBr(condition, body_block, end_block);
+
+            builder_.SetInsertPoint(body_block);
+            llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(allocated_type), storage, index, "new.array.elem.addr");
+            llvm::Value* constructed = builder_.CreateCall(ctor->llvm_function, ctor_args, "new.array.value");
+            builder_.CreateStore(constructed, element_address);
+            llvm::Value* next = builder_.CreateAdd(index, llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 1), "new.array.next");
+            builder_.CreateStore(next, index_slot);
+            builder_.CreateBr(cond_block);
+
+            builder_.SetInsertPoint(end_block);
             return storage;
         }
 
-        if (expr.args.size() == 1) {
+        if (!expr.is_array && expr.args.size() == 1) {
             llvm::Value* init = emit_expression(expr.args[0].get());
             SemanticType init_type = infer_expr_type(expr.args[0].get());
             builder_.CreateStore(cast_value(init, init_type, allocated_type, true), storage);
+            return storage;
+        }
+
+        llvm::Value* init_value = nullptr;
+        if (expr.args.size() == 1) {
+            init_value = emit_expression(expr.args[0].get());
+            SemanticType init_type = infer_expr_type(expr.args[0].get());
+            init_value = cast_value(init_value, init_type, allocated_type, true);
         } else {
+            init_value = zero_value(allocated_type);
+        }
+
+        if (!expr.is_array) {
+            builder_.CreateStore(init_value, storage);
+        } else {
+            llvm::Function* function = current_function_;
+            llvm::BasicBlock* cond_block = llvm::BasicBlock::Create(context_, "new.array.cond", function);
+            llvm::BasicBlock* body_block = llvm::BasicBlock::Create(context_, "new.array.body", function);
+            llvm::BasicBlock* end_block = llvm::BasicBlock::Create(context_, "new.array.end", function);
+            llvm::AllocaInst* index_slot = create_entry_alloca(current_function_, llvm::Type::getInt64Ty(context_), "new.array.index");
+            builder_.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0), index_slot);
+            builder_.CreateBr(cond_block);
+
+            builder_.SetInsertPoint(cond_block);
+            llvm::Value* index = builder_.CreateLoad(llvm::Type::getInt64Ty(context_), index_slot, "new.array.index");
+            llvm::Value* condition = builder_.CreateICmpULT(index, element_count, "new.array.more");
+            builder_.CreateCondBr(condition, body_block, end_block);
+
+            builder_.SetInsertPoint(body_block);
+            llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(allocated_type), storage, index, "new.array.elem.addr");
+            builder_.CreateStore(init_value, element_address);
+            llvm::Value* next = builder_.CreateAdd(index, llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 1), "new.array.next");
+            builder_.CreateStore(next, index_slot);
+            builder_.CreateBr(cond_block);
+
+            builder_.SetInsertPoint(end_block);
+        }
+        if (!expr.is_array && expr.args.empty()) {
             builder_.CreateStore(zero_value(allocated_type), storage);
         }
         return storage;
@@ -1666,6 +1922,21 @@ private:
                 return resolution;
             }
 
+            if (auto static_owner = referenced_struct_name(member->object.get())) {
+                if (const auto struct_it = structs_.find(*static_owner); struct_it != structs_.end()) {
+                    if (const auto methods = struct_it->second.methods.find(member->member); methods != struct_it->second.methods.end()) {
+                        std::vector<FunctionInfo*> static_methods;
+                        for (FunctionInfo* function : methods->second) {
+                            if (function != nullptr && function->is_static_method) {
+                                static_methods.push_back(function);
+                            }
+                        }
+                        resolution.function = choose_overload(static_methods, arg_types);
+                    }
+                }
+                return resolution;
+            }
+
             SemanticType object_type = infer_expr_type(member->object.get());
             if (member->via_arrow) {
                 object_type.is_pointer = false;
@@ -1673,10 +1944,18 @@ private:
             }
             if (const auto struct_it = structs_.find(object_type.name); struct_it != structs_.end()) {
                 if (const auto methods = struct_it->second.methods.find(member->member); methods != struct_it->second.methods.end()) {
-                    resolution.function = choose_overload(methods->second, arg_types);
-                    resolution.object_type = object_type;
-                    resolution.object_address = member->via_arrow ? emit_expression(member->object.get())
-                                                                  : ensure_address(member->object.get(), infer_expr_type(member->object.get()));
+                    std::vector<FunctionInfo*> instance_methods;
+                    for (FunctionInfo* function : methods->second) {
+                        if (function != nullptr && !function->is_static_method) {
+                            instance_methods.push_back(function);
+                        }
+                    }
+                    resolution.function = choose_overload(instance_methods, arg_types);
+                    if (resolution.function != nullptr) {
+                        resolution.object_type = object_type;
+                        resolution.object_address = member->via_arrow ? emit_expression(member->object.get())
+                                                                      : ensure_address(member->object.get(), infer_expr_type(member->object.get()));
+                    }
                 }
             }
         }
@@ -1726,7 +2005,8 @@ private:
         }
 
         std::vector<llvm::Value*> args;
-        if (resolution.function->kind == FunctionKind::Method || resolution.function->kind == FunctionKind::Conversion) {
+        if ((resolution.function->kind == FunctionKind::Method && !resolution.function->is_static_method) ||
+            resolution.function->kind == FunctionKind::Conversion) {
             if (resolution.object_address == nullptr) {
                 errors_.push_back("Method call requires addressable object");
                 return nullptr;
@@ -1882,8 +2162,37 @@ private:
         SemanticType pointee = type;
         pointee.is_pointer = false;
         pointee.is_reference = false;
-        emit_destructor_call(pointee, pointer);
-        builder_.CreateCall(ensure_free(), {builder_.CreateBitCast(pointer, llvm::PointerType::get(context_, 0))});
+        llvm::Value* element_count = heap_count_from_payload(pointer);
+
+        if (type_has_destructor(pointee)) {
+            llvm::Function* function = current_function_;
+            llvm::BasicBlock* cond_block = llvm::BasicBlock::Create(context_, "delete.array.cond", function);
+            llvm::BasicBlock* body_block = llvm::BasicBlock::Create(context_, "delete.array.body", function);
+            llvm::BasicBlock* end_block = llvm::BasicBlock::Create(context_, "delete.array.end", function);
+            llvm::AllocaInst* index_slot = create_entry_alloca(current_function_, llvm::Type::getInt64Ty(context_), "delete.index");
+            builder_.CreateStore(element_count, index_slot);
+            builder_.CreateBr(cond_block);
+
+            builder_.SetInsertPoint(cond_block);
+            llvm::Value* index = builder_.CreateLoad(llvm::Type::getInt64Ty(context_), index_slot, "delete.index");
+            llvm::Value* has_more = builder_.CreateICmpUGT(index,
+                                                           llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0),
+                                                           "delete.has_more");
+            builder_.CreateCondBr(has_more, body_block, end_block);
+
+            builder_.SetInsertPoint(body_block);
+            llvm::Value* current = builder_.CreateSub(index,
+                                                      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 1),
+                                                      "delete.current");
+            llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(pointee), pointer, current, "delete.elem.addr");
+            emit_destructor_call(pointee, element_address);
+            builder_.CreateStore(current, index_slot);
+            builder_.CreateBr(cond_block);
+
+            builder_.SetInsertPoint(end_block);
+        }
+
+        builder_.CreateCall(ensure_free(), {heap_raw_from_payload(pointer)});
     }
 
     void emit_if_statement(const IfStmt& if_stmt) {

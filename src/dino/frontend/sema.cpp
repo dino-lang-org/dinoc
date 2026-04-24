@@ -40,6 +40,9 @@ struct FunctionSig {
     SemanticType return_type;
     std::vector<SemanticType> params;
     bool variadic = false;
+    bool is_extern = false;
+    bool no_mangle = false;
+    bool is_static = false;
     AccessModifier access = AccessModifier::Public;
     SourceLocation location;
 };
@@ -47,14 +50,17 @@ struct FunctionSig {
 struct FieldInfo {
     SemanticType type;
     AccessModifier access = AccessModifier::Private;
+    bool is_static = false;
 };
 
 struct StructInfo {
     std::string name;
     std::unordered_map<std::string, FieldInfo> fields;
+    std::unordered_map<std::string, FieldInfo> static_fields;
     std::unordered_map<std::string, std::vector<FunctionSig>> methods;
     std::vector<FunctionSig> constructors;
     std::vector<FunctionSig> conversions;
+    bool has_destructor = false;
     SourceLocation location;
 };
 
@@ -274,11 +280,17 @@ private:
                 if (const auto* st = dynamic_cast<const StructDecl*>(decl.get())) {
                     StructInfo info;
                     info.name = st->name;
+                    info.has_destructor = !st->destructors.empty();
                     info.location = st->location;
                     for (const auto& f : st->fields) {
                         SemanticType field_type = from_typeref(f.type);
                         for (const auto& field_name : f.names) {
-                            info.fields[field_name] = FieldInfo {field_type, f.access};
+                            FieldInfo field_info {field_type, f.access, f.is_static};
+                            if (f.is_static) {
+                                info.static_fields[field_name] = field_info;
+                            } else {
+                                info.fields[field_name] = field_info;
+                            }
                         }
                     }
                     for (const auto& m : st->methods) {
@@ -294,6 +306,9 @@ private:
                             }
                             sig.params.push_back(pt);
                         }
+                        sig.is_extern = m.attributes.is_extern;
+                        sig.no_mangle = m.attributes.no_mangle;
+                        sig.is_static = m.is_static;
                         info.methods[m.name].push_back(std::move(sig));
                     }
                     for (const auto& c : st->constructors) {
@@ -332,6 +347,8 @@ private:
                         }
                         sig.params.push_back(pt);
                     }
+                    sig.is_extern = fn->attributes.is_extern;
+                    sig.no_mangle = fn->attributes.no_mangle;
                     functions_[fn->name].push_back(std::move(sig));
                 }
             }
@@ -391,6 +408,14 @@ private:
         for (const auto& tp : fn.template_params) {
             active_template_types_.insert(tp);
         }
+        check_ffi_attributes(fn.location,
+                             fn.name,
+                             fn.attributes,
+                             fn.body != nullptr,
+                             functions_[fn.name].size(),
+                             std::ranges::any_of(fn.parameters, [](const Parameter& parameter) { return parameter.type.variadic; }),
+                             false,
+                             "");
         SemanticType ret = from_typeref(fn.return_type);
         if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
                                     !is_visible_symbol(ret.name))) {
@@ -409,9 +434,11 @@ private:
             }
         }
 
-        return_type_stack_.push_back(ret);
-        check_statement(fn.body.get(), false, nullptr);
-        return_type_stack_.pop_back();
+        if (fn.body != nullptr) {
+            return_type_stack_.push_back(ret);
+            check_statement(fn.body.get(), false, nullptr);
+            return_type_stack_.pop_back();
+        }
         pop_scope();
         active_template_types_.clear();
     }
@@ -454,6 +481,14 @@ private:
     }
 
     void check_method(const StructDecl& owner, const MethodDecl& method) {
+        check_ffi_attributes(method.location,
+                             method.name,
+                             method.attributes,
+                             method.body != nullptr,
+                             structs_[owner.name].methods[method.name].size(),
+                             std::ranges::any_of(method.parameters, [](const Parameter& parameter) { return parameter.type.variadic; }),
+                             true,
+                             owner.name);
         SemanticType ret = from_typeref(method.return_type);
         if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
                                     !is_visible_symbol(ret.name) && ret.name != owner.name)) {
@@ -461,10 +496,13 @@ private:
         }
 
         push_scope();
-        SemanticType this_type;
-        this_type.name = owner.name;
-        this_type.is_pointer = true;
-        declare_var("this", this_type);
+        current_method_is_static_ = method.is_static;
+        if (!method.is_static) {
+            SemanticType this_type;
+            this_type.name = owner.name;
+            this_type.is_pointer = true;
+            declare_var("this", this_type);
+        }
 
         for (const auto& p : method.parameters) {
             SemanticType pt = from_typeref(p.type);
@@ -477,10 +515,73 @@ private:
             }
         }
 
-        return_type_stack_.push_back(ret);
-        check_statement(method.body.get(), false, nullptr);
-        return_type_stack_.pop_back();
+        if (method.body != nullptr) {
+            return_type_stack_.push_back(ret);
+            check_statement(method.body.get(), false, nullptr);
+            return_type_stack_.pop_back();
+        }
+        current_method_is_static_ = false;
         pop_scope();
+    }
+
+    std::optional<std::string> referenced_struct_name(const Expr* expr) const {
+        const auto* identifier = dynamic_cast<const IdentifierExpr*>(expr);
+        if (identifier == nullptr) {
+            return std::nullopt;
+        }
+        if (!is_visible_symbol(identifier->name) || !structs_.contains(identifier->name)) {
+            return std::nullopt;
+        }
+        return identifier->name;
+    }
+
+    [[nodiscard]] const FunctionSig* choose_method_overload(const std::vector<SemanticType>& args,
+                                                            const std::vector<FunctionSig>& overloads,
+                                                            bool want_static) const {
+        for (const auto& overload : overloads) {
+            if (overload.is_static != want_static) {
+                continue;
+            }
+            if (args_match_sig(args, overload)) {
+                return &overload;
+            }
+        }
+        return nullptr;
+    }
+
+    void check_ffi_attributes(const SourceLocation& loc,
+                              const std::string& name,
+                              const FunctionAttributes& attributes,
+                              bool has_body,
+                              size_t overload_count,
+                              bool is_variadic,
+                              bool is_method,
+                              const std::string& owner) {
+        if (attributes.is_extern && attributes.no_mangle) {
+            error(loc, "Attributes '#[extern]' and '#[no_mangle]' cannot be used together on '{}'", name);
+        }
+        if (attributes.is_extern && has_body) {
+            error(loc, "Extern {} '{}' must not have a body", is_method ? "method" : "function", name);
+        }
+        if (!attributes.is_extern && !has_body) {
+            error(loc, "Only '#[extern]' {} declarations may omit a body for '{}'", is_method ? "method" : "function", name);
+        }
+        if (attributes.no_mangle && !has_body) {
+            error(loc, "No-mangle {} '{}' must have a body", is_method ? "method" : "function", name);
+        }
+        if (attributes.uses_c_abi() && overload_count > 1) {
+            if (is_method) {
+                error(loc, "Method '{}.{}' with C ABI attributes cannot be overloaded", owner, name);
+            } else {
+                error(loc, "Function '{}' with C ABI attributes cannot be overloaded", name);
+            }
+        }
+        if (is_variadic && !attributes.is_extern) {
+            error(loc,
+                  "Variadic arguments are only allowed for '#[extern]' {} '{}'",
+                  is_method ? "methods" : "functions",
+                  name);
+        }
     }
 
     void check_conversion(const StructDecl& owner, const ConversionDecl& conv) {
@@ -752,7 +853,26 @@ private:
             if (const auto var = lookup_var(e->name)) {
                 return *var;
             }
+            if (current_struct_.has_value() && current_method_is_static_) {
+                const auto sit = structs_.find(*current_struct_);
+                if (sit != structs_.end()) {
+                    const auto fit = sit->second.fields.find(e->name);
+                    if (fit != sit->second.fields.end()) {
+                        error(e->location, "Static methods cannot access instance field '{}' without an object", e->name);
+                        return SemanticType::error();
+                    }
+                }
+            }
             if (current_struct_.has_value()) {
+                const auto sit = structs_.find(*current_struct_);
+                if (sit != structs_.end()) {
+                    const auto sfit = sit->second.static_fields.find(e->name);
+                    if (sfit != sit->second.static_fields.end()) {
+                        return sfit->second.type;
+                    }
+                }
+            }
+            if (current_struct_.has_value() && !current_method_is_static_) {
                 const auto sit = structs_.find(*current_struct_);
                 if (sit != structs_.end()) {
                     const auto fit = sit->second.fields.find(e->name);
@@ -899,6 +1019,30 @@ private:
         }
 
         if (const auto* e = dynamic_cast<const MemberExpr*>(expr)) {
+            if (auto static_owner = referenced_struct_name(e->object.get())) {
+                if (e->via_arrow) {
+                    error(e->location, "Access operator '->' cannot be used with a type name");
+                    return SemanticType::error();
+                }
+                const auto it = structs_.find(*static_owner);
+                const auto field = it->second.static_fields.find(e->member);
+                if (field != it->second.static_fields.end()) {
+                    return field->second.type;
+                }
+                const auto method = it->second.methods.find(e->member);
+                if (method != it->second.methods.end()) {
+                    for (const auto& overload : method->second) {
+                        if (overload.is_static) {
+                            warning(e->location, "Maybe you want to call it?");
+                            return overload.return_type;
+                        }
+                    }
+                    error(e->location, "Method '{}.{}' is not static", *static_owner, e->member);
+                    return SemanticType::error();
+                }
+                error(e->location, "Static member access supports only static fields and static methods in structure '{}'", *static_owner);
+                return SemanticType::error();
+            }
             SemanticType obj = infer_expr_type(e->object.get());
             if (obj.is_error) {
                 return obj;
@@ -929,8 +1073,14 @@ private:
 
             const auto method = it->second.methods.find(e->member);
             if (method != it->second.methods.end() && !method->second.empty()) {
-                warning(e->location, "Maybe you want to call it?");
-                return method->second.front().return_type;
+                for (const auto& overload : method->second) {
+                    if (!overload.is_static) {
+                        warning(e->location, "Maybe you want to call it?");
+                        return overload.return_type;
+                    }
+                }
+                error(e->location, "Method '{}.{}' is static and should be called through the type", it->second.name, e->member);
+                return SemanticType::error();
             }
 
             error(e->location, "In structure: '{}': unknown member with name '{}'", it->second.name, e->member);
@@ -975,6 +1125,32 @@ private:
                 return SemanticType::error();
             }
 
+            if (e->placement) {
+                SemanticType placement = infer_expr_type(e->placement.get());
+                if (!placement.is_pointer) {
+                    error(e->location, "placement new requires a pointer address");
+                    return SemanticType::error();
+                }
+                SemanticType pointee = placement;
+                pointee.is_pointer = false;
+                pointee.is_reference = false;
+                if (!same_type(pointee, allocated)) {
+                    error(e->location,
+                          "placement new address type '{}' is incompatible with allocated type '{}'",
+                          type_to_string(placement),
+                          type_to_string(allocated));
+                    return SemanticType::error();
+                }
+            }
+
+            if (e->is_array) {
+                SemanticType size_type = infer_expr_type(e->array_size.get());
+                if (!is_integer_type(size_type)) {
+                    error(e->location, "new[] requires an integer size expression");
+                    return SemanticType::error();
+                }
+            }
+
             std::vector<SemanticType> args;
             args.reserve(e->args.size());
             for (const auto& arg : e->args) {
@@ -998,6 +1174,40 @@ private:
 
             allocated.is_pointer = true;
             return allocated;
+        }
+
+        if (const auto* e = dynamic_cast<const DestructorCallExpr*>(expr)) {
+            SemanticType object = infer_expr_type(e->object.get());
+            SemanticType base = object;
+            if (e->via_arrow) {
+                if (!base.is_pointer) {
+                    error(e->location, "Destructor call via '->' requires pointer type");
+                    return SemanticType::error();
+                }
+                base.is_pointer = false;
+                base.is_reference = false;
+            } else if (base.is_reference) {
+                base.is_reference = false;
+            }
+
+            if (base.name != e->type_name) {
+                error(e->location,
+                      "Destructor name '{}' does not match object type '{}'",
+                      e->type_name,
+                      type_to_string(base));
+                return SemanticType::error();
+            }
+
+            const auto it = structs_.find(base.name);
+            if (it == structs_.end()) {
+                error(e->location, "Explicit destructor call requires a structure type");
+                return SemanticType::error();
+            }
+            if (!it->second.has_destructor) {
+                error(e->location, "Structure '{}' does not have a destructor", base.name);
+                return SemanticType::error();
+            }
+            return SemanticType::void_type();
         }
 
         if (const auto* e = dynamic_cast<const CallExpr*>(expr)) {
@@ -1048,6 +1258,24 @@ private:
                     }
                 }
 
+                if (auto static_owner = referenced_struct_name(member->object.get())) {
+                    if (member->via_arrow) {
+                        error(member->location, "Operator '->' cannot be used with a type name");
+                        return SemanticType::error();
+                    }
+                    const auto it = structs_.find(*static_owner);
+                    const auto mit = it->second.methods.find(member->member);
+                    if (mit == it->second.methods.end()) {
+                        error(member->location, "Not found static method with name '{}' in structure '{}'", member->member, *static_owner);
+                        return SemanticType::error();
+                    }
+                    if (const FunctionSig* sig = choose_method_overload(args, mit->second, true)) {
+                        return sig->return_type;
+                    }
+                    error(member->location, "Not found compatible static method overload with name '{}'", member->member);
+                    return SemanticType::error();
+                }
+
                 SemanticType obj = infer_expr_type(member->object.get());
                 if (obj.is_error) {
                     return obj;
@@ -1074,7 +1302,7 @@ private:
                     error(member->location, "Not found methods with name '{}' in structure with name '{}'", member->member, it->second.name);
                     return SemanticType::error();
                 }
-                if (const FunctionSig* sig = choose_overload(args, mit->second)) {
+                if (const FunctionSig* sig = choose_method_overload(args, mit->second, false)) {
                     return sig->return_type;
                 }
                 error(member->location, "Not found compatible method overload with name '{}'", member->member);
@@ -1167,6 +1395,7 @@ private:
     std::unordered_map<std::string, std::string> current_modules_;
     std::vector<SemanticType> return_type_stack_;
     std::vector<Scope> scopes_;
+    bool current_method_is_static_ = false;
 
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_map<std::string, std::vector<FunctionSig>> functions_;

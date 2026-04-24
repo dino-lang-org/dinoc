@@ -19,6 +19,7 @@ enum class TokenType {
     Character,
 
     At,
+    Hash,
     Comma,
     Dot,
     Colon,
@@ -92,6 +93,7 @@ enum class TokenType {
     KwBool,
 
     KwStruct,
+    KwStatic,
     KwIf,
     KwElse,
     KwWhile,

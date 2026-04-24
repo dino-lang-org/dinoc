@@ -172,6 +172,7 @@ Token Lexer::scan_operator_or_punct(size_t start, size_t start_line, size_t star
     const char c = advance();
     switch (c) {
     case '@': return make_token(TokenType::At, start, start_line, start_column);
+    case '#': return make_token(TokenType::Hash, start, start_line, start_column);
     case ',': return make_token(TokenType::Comma, start, start_line, start_column);
     case '.':
         if (match('.') && match('.')) {
@@ -261,6 +262,7 @@ TokenType Lexer::identifier_keyword(const std::string& text) const {
         {"void", TokenType::KwVoid},
         {"bool", TokenType::KwBool},
         {"struct", TokenType::KwStruct},
+        {"static", TokenType::KwStatic},
         {"if", TokenType::KwIf},
         {"else", TokenType::KwElse},
         {"while", TokenType::KwWhile},
