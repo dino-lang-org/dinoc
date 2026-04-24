@@ -706,6 +706,7 @@ namespace dino::codegen {
 							info->is_extern = method_decl.attributes.is_extern;
 							info->no_mangle = method_decl.attributes.no_mangle;
 							info->is_static_method = method_decl.is_static;
+							info->template_params = method_decl.template_params;
 							for (const auto& parameter: method_decl.parameters) {
 								if (parameter.type.variadic) {
 									info->variadic = true;
@@ -893,7 +894,8 @@ namespace dino::codegen {
 			std::string specialization_key(const FunctionInfo& function,
 										   const std::vector<SemanticType>& params,
 										   const std::unordered_map<std::string, SemanticType>& bindings) const {
-				std::string key = function.name + "<" + template_param_key(function.template_params) + ">(";
+				std::string key = (function.owner.empty() ? function.name : function.owner + "::" + function.name) +
+								  "<" + template_param_key(function.template_params) + ">(";
 				for (size_t i = 0; i < params.size(); ++i) {
 					if (i != 0) {
 						key += ",";
@@ -911,7 +913,9 @@ namespace dino::codegen {
 			}
 
 			FunctionInfo* instantiate_template_function(FunctionInfo* function_template, const std::vector<SemanticType>& args) {
-				if (function_template == nullptr || function_template->function == nullptr || function_template->template_params.empty()) {
+				if (function_template == nullptr ||
+					(function_template->function == nullptr && function_template->method == nullptr) ||
+					function_template->template_params.empty()) {
 					return nullptr;
 				}
 
@@ -976,10 +980,12 @@ namespace dino::codegen {
 				}
 
 				auto instance = std::make_unique<FunctionInfo>();
-				instance->kind = FunctionKind::Free;
+				instance->kind = function_template->kind;
+				instance->owner = function_template->owner;
 				instance->name = function_template->name;
 				instance->owner_unit = function_template->owner_unit;
 				instance->function = function_template->function;
+				instance->method = function_template->method;
 				instance->return_type = substitute_semantic_type(function_template->return_type, bindings);
 				instance->params = concrete_params;
 				instance->param_is_pack = function_template->param_is_pack;
@@ -988,15 +994,23 @@ namespace dino::codegen {
 				instance->is_extern = function_template->is_extern;
 				instance->no_mangle = function_template->no_mangle;
 				instance->external_only = function_template->external_only;
+				instance->is_static_method = function_template->is_static_method;
 				instance->is_template_instance = true;
-				instance->llvm_name = mangle_free_function(*instance);
+				instance->llvm_name = instance->kind == FunctionKind::Method ? mangle_method(*instance) : mangle_free_function(*instance);
 
 				FunctionInfo* result = instance.get();
 				owned_functions_.push_back(std::move(instance));
-				free_functions_[result->name].push_back(result);
+				if (result->kind == FunctionKind::Method) {
+					structs_[result->owner].methods[result->name].push_back(result);
+				} else {
+					free_functions_[result->name].push_back(result);
+				}
 				template_instances_[key] = result;
 
 				std::vector<llvm::Type*> llvm_params;
+				if (result->kind == FunctionKind::Method && !result->is_static_method) {
+					llvm_params.push_back(llvm::PointerType::get(context_, 0));
+				}
 				for (const auto& parameter: result->params) {
 					llvm_params.push_back(llvm_type(parameter, true));
 				}
@@ -1372,6 +1386,63 @@ namespace dino::codegen {
 				}
 			}
 
+			void bind_template_instance_parameters(const std::vector<Parameter>& parameters,
+												  FunctionInfo& info,
+												  size_t start_index = 0) {
+				std::unordered_map<std::string, SemanticType> bindings;
+				std::unordered_map<std::string, bool> template_param_names;
+				for (const auto& param: info.template_params) {
+					template_param_names[param.name] = param.is_pack;
+				}
+				size_t concrete_index = 0;
+				for (const auto& parameter: parameters) {
+					if (parameter.type.variadic) {
+						continue;
+					}
+					if (parameter.is_pack) {
+						while (concrete_index < info.params.size()) {
+							if (template_param_names.contains(parameter.type.name)) {
+								bindings[parameter.type.name] = info.params[concrete_index];
+							}
+							++concrete_index;
+						}
+						break;
+					}
+					if (template_param_names.contains(parameter.type.name)) {
+						bindings[parameter.type.name] = info.params[concrete_index];
+					}
+					++concrete_index;
+				}
+				current_template_bindings_ = std::move(bindings);
+
+				size_t arg_index = 0;
+				for (const auto& parameter: parameters) {
+					if (parameter.type.variadic) {
+						continue;
+					}
+					if (parameter.is_pack) {
+						std::vector<PackElementInfo> pack;
+						while (arg_index < info.params.size()) {
+							llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(arg_index + start_index));
+							const std::string hidden_name = std::format("{}${}", parameter.name, pack.size());
+							arg->setName(hidden_name);
+							llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(info.params[arg_index], true), hidden_name);
+							builder_.CreateStore(arg, slot);
+							pack.push_back(PackElementInfo{info.params[arg_index], slot});
+							++arg_index;
+						}
+						current_pack_bindings_[parameter.name] = std::move(pack);
+						continue;
+					}
+					llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(arg_index + start_index));
+					arg->setName(parameter.name);
+					llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(info.params[arg_index], true), parameter.name);
+					builder_.CreateStore(arg, slot);
+					declare_variable(parameter.name, VariableInfo{info.params[arg_index], slot, false});
+					++arg_index;
+				}
+			}
+
 			void define_free_function(FunctionInfo& info) {
 				if (info.is_defined || info.is_defining) {
 					return;
@@ -1380,58 +1451,7 @@ namespace dino::codegen {
 				begin_function(info);
 				current_unit_ = info.owner_unit;
 				if (info.is_template_instance && info.function != nullptr) {
-					std::unordered_map<std::string, SemanticType> bindings;
-					std::unordered_map<std::string, bool> template_param_names;
-					for (const auto& param: info.template_params) {
-						template_param_names[param.name] = param.is_pack;
-					}
-					size_t concrete_index = 0;
-					for (const auto& parameter: info.function->parameters) {
-						if (parameter.type.variadic) {
-							continue;
-						}
-						if (parameter.is_pack) {
-							while (concrete_index < info.params.size()) {
-								if (template_param_names.contains(parameter.type.name)) {
-									bindings[parameter.type.name] = info.params[concrete_index];
-								}
-								++concrete_index;
-							}
-							break;
-						}
-						if (template_param_names.contains(parameter.type.name)) {
-							bindings[parameter.type.name] = info.params[concrete_index];
-						}
-						++concrete_index;
-					}
-					current_template_bindings_ = std::move(bindings);
-
-					size_t arg_index = 0;
-					for (const auto& parameter: info.function->parameters) {
-						if (parameter.type.variadic) {
-							continue;
-						}
-						if (parameter.is_pack) {
-							std::vector<PackElementInfo> pack;
-							while (arg_index < info.params.size()) {
-								llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(arg_index));
-								const std::string hidden_name = std::format("{}${}", parameter.name, pack.size());
-								arg->setName(hidden_name);
-								llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(info.params[arg_index], true), hidden_name);
-								builder_.CreateStore(arg, slot);
-								pack.push_back(PackElementInfo{info.params[arg_index], slot});
-								++arg_index;
-							}
-							current_pack_bindings_[parameter.name] = std::move(pack);
-							continue;
-						}
-						llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(arg_index));
-						arg->setName(parameter.name);
-						llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(info.params[arg_index], true), parameter.name);
-						builder_.CreateStore(arg, slot);
-						declare_variable(parameter.name, VariableInfo{info.params[arg_index], slot, false});
-						++arg_index;
-					}
+					bind_template_instance_parameters(info.function->parameters, info);
 				} else {
 					std::vector<std::string> names;
 					names.reserve(info.function->parameters.size());
@@ -1493,12 +1513,16 @@ namespace dino::codegen {
 					declare_variable("this", VariableInfo{SemanticType{info.owner, false, false, true}, this_arg, false});
 				}
 
-				std::vector<std::string> names;
-				names.reserve(info.method->parameters.size());
-				for (const auto& parameter: info.method->parameters) {
-					names.push_back(parameter.name);
+				if (info.is_template_instance && info.method != nullptr) {
+					bind_template_instance_parameters(info.method->parameters, info, info.is_static_method ? 0 : 1);
+				} else {
+					std::vector<std::string> names;
+					names.reserve(info.method->parameters.size());
+					for (const auto& parameter: info.method->parameters) {
+						names.push_back(parameter.name);
+					}
+					bind_parameters(info.params, names, info.is_static_method ? 0 : 1);
 				}
-				bind_parameters(info.params, names, info.is_static_method ? 0 : 1);
 				emit_statement(info.method->body.get());
 				finish_function(info);
 			}
@@ -2637,6 +2661,17 @@ namespace dino::codegen {
 									}
 								}
 								resolution.function = choose_overload(static_methods, arg_types);
+								if (resolution.function == nullptr) {
+									for (FunctionInfo* candidate: static_methods) {
+										if (candidate == nullptr || candidate->template_params.empty() || candidate->is_template_instance) {
+											continue;
+										}
+										if (FunctionInfo* instance = instantiate_template_function(candidate, arg_types)) {
+											resolution.function = instance;
+											break;
+										}
+									}
+								}
 							}
 						}
 						return resolution;
@@ -2656,6 +2691,17 @@ namespace dino::codegen {
 								}
 							}
 							resolution.function = choose_overload(instance_methods, arg_types);
+							if (resolution.function == nullptr) {
+								for (FunctionInfo* candidate: instance_methods) {
+									if (candidate == nullptr || candidate->template_params.empty() || candidate->is_template_instance) {
+										continue;
+									}
+									if (FunctionInfo* instance = instantiate_template_function(candidate, arg_types)) {
+										resolution.function = instance;
+										break;
+									}
+								}
+							}
 							if (resolution.function != nullptr) {
 								resolution.object_type = object_type;
 								resolution.object_address = member->via_arrow ? emit_expression(member->object.get())
@@ -2708,7 +2754,14 @@ namespace dino::codegen {
 			llvm::Value* emit_call(const CallExpr& call) {
 				CallResolution resolution = resolve_call(&call);
 				if (resolution.function == nullptr || resolution.function->llvm_function == nullptr) {
-					errors_.push_back("Unable to resolve function call");
+					std::string callee = call.callee != nullptr ? call.callee->kind() : "<null>";
+					if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(call.callee.get())) {
+						callee = identifier->name;
+					} else if (const auto* member = dynamic_cast<const MemberExpr*>(call.callee.get())) {
+						callee = member->member;
+					}
+					errors_.push_back(
+						std::format("Unable to resolve function call '{}' at {}:{}", callee, call.location.line, call.location.column));
 					return nullptr;
 				}
 

@@ -325,6 +325,7 @@ namespace dino::frontend {
 								sig.return_type = from_typeref(m.return_type);
 								sig.access = m.access;
 								sig.location = m.location;
+								sig.template_params = m.template_params;
 								for (const auto& p: m.parameters) {
 									SemanticType pt = from_typeref(p.type);
 									if (p.type.variadic) {
@@ -589,6 +590,13 @@ namespace dino::frontend {
 			}
 
 			void check_method(const StructDecl& owner, const MethodDecl& method) {
+				active_template_types_.clear();
+				for (const auto& tp: owner.template_params) {
+					active_template_types_.insert(tp.name);
+				}
+				for (const auto& tp: method.template_params) {
+					active_template_types_.insert(tp.name);
+				}
 				check_ffi_attributes(method.location,
 									 method.name,
 									 method.attributes,
@@ -623,6 +631,13 @@ namespace dino::frontend {
 					}
 				}
 
+				if (!method.template_params.empty()) {
+					current_method_is_static_ = false;
+					pop_scope();
+					active_template_types_.clear();
+					return;
+				}
+
 				if (method.body != nullptr) {
 					return_type_stack_.push_back(ret);
 					check_statement(method.body.get(), false, nullptr);
@@ -630,6 +645,7 @@ namespace dino::frontend {
 				}
 				current_method_is_static_ = false;
 				pop_scope();
+				active_template_types_.clear();
 			}
 
 			std::optional<std::string> referenced_struct_name(const Expr* expr) const {
@@ -651,6 +667,9 @@ namespace dino::frontend {
 																	bool want_static) const {
 				for (const auto& overload: overloads) {
 					if (overload.is_static != want_static) {
+						continue;
+					}
+					if (!overload.template_params.empty()) {
 						continue;
 					}
 					if (args_match_sig(args, overload)) {
@@ -1511,6 +1530,14 @@ namespace dino::frontend {
 							if (const FunctionSig* sig = choose_method_overload(args, mit->second, true)) {
 								return sig->return_type;
 							}
+							for (const auto& sig: mit->second) {
+								if (!sig.is_static) {
+									continue;
+								}
+								if (const auto deduced = try_match_template_overload(args, sig)) {
+									return *deduced;
+								}
+							}
 							error(member->location, "Not found compatible static method overload with name '{}'", member->member);
 							return SemanticType::error();
 						}
@@ -1543,6 +1570,14 @@ namespace dino::frontend {
 						}
 						if (const FunctionSig* sig = choose_method_overload(args, mit->second, false)) {
 							return sig->return_type;
+						}
+						for (const auto& sig: mit->second) {
+							if (sig.is_static) {
+								continue;
+							}
+							if (const auto deduced = try_match_template_overload(args, sig)) {
+								return *deduced;
+							}
 						}
 						error(member->location, "Not found compatible method overload with name '{}'", member->member);
 						return SemanticType::error();

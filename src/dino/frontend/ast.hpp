@@ -270,6 +270,7 @@ namespace dino::frontend {
 		AccessModifier access = AccessModifier::Private;
 		FunctionAttributes attributes;
 		bool is_static = false;
+		std::vector<TemplateParam> template_params;
 		TypeRef return_type;
 		std::string name;
 		std::vector<Parameter> parameters;

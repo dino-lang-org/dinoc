@@ -241,6 +241,11 @@ namespace dino::frontend {
 
 				while (!check(TokenType::RBrace) && !check(TokenType::EndOfFile)) {
 					DeclAttributes member_attributes = parse_decl_attributes();
+					std::vector<TemplateParam> member_template_params;
+					while (match(TokenType::KwTemplate)) {
+						auto parsed = parse_template_params();
+						member_template_params.insert(member_template_params.end(), parsed.begin(), parsed.end());
+					}
 					AccessModifier member_access = AccessModifier::Private;
 					if (match(TokenType::KwPublic)) {
 						member_access = AccessModifier::Public;
@@ -317,6 +322,7 @@ namespace dino::frontend {
 							m.access = member_access;
 							m.attributes = member_attributes.function;
 							m.is_static = member_static;
+							m.template_params = std::move(member_template_params);
 							m.return_type = std::move(type);
 							m.name = id->lexeme;
 							m.parameters = parse_parameter_list();
@@ -328,6 +334,9 @@ namespace dino::frontend {
 								decl->methods.push_back(std::move(m));
 							}
 						} else {
+							if (!member_template_params.empty()) {
+								error(*id, "Template parameters are only allowed on methods");
+							}
 							if (member_attributes.function.uses_c_abi()) {
 								error(*id, "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
 							}
