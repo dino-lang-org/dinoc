@@ -183,6 +183,7 @@ namespace dino::frontend {
 	struct VarDeclStmt : Stmt {
 		TypeRef type;
 		std::string name;
+		bool is_static = false;
 		bool is_array = false;
 		ExprPtr init;
 		std::vector<ExprPtr> array_init;

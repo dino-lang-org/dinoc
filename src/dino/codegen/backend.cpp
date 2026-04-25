@@ -115,6 +115,13 @@ namespace dino::codegen {
 			bool needs_destructor = false;
 		};
 
+		struct StaticLocalInfo {
+			SemanticType type;
+			llvm::GlobalVariable* storage = nullptr;
+			llvm::GlobalVariable* guard = nullptr;
+			llvm::Function* cleanup = nullptr;
+		};
+
 		struct GlobalVarInfo {
 			SemanticType type;
 			bool is_extern = false;
@@ -262,6 +269,19 @@ namespace dino::codegen {
 				   lhs.is_array == rhs.is_array && lhs.array_size == rhs.array_size;
 		}
 
+		bool matches_template_wrapper_shape(const SemanticType& pattern, const SemanticType& actual) {
+			if (pattern.is_pointer && !actual.is_pointer) {
+				return false;
+			}
+			if (pattern.is_reference && !actual.is_reference) {
+				return false;
+			}
+			if (pattern.is_array && !actual.is_array) {
+				return false;
+			}
+			return true;
+		}
+
 		SemanticType numeric_common_type(const SemanticType& lhs, const SemanticType& rhs) {
 			if (lhs.name == "double" || rhs.name == "double") {
 				return SemanticType{"double"};
@@ -367,6 +387,8 @@ namespace dino::codegen {
 			YieldContext* current_yield_ = nullptr;
 			std::unordered_map<std::string, SemanticType> current_template_bindings_;
 			std::unordered_map<std::string, std::vector<PackElementInfo>> current_pack_bindings_;
+			std::unordered_map<std::string, StaticLocalInfo> static_locals_;
+			size_t static_local_id_ = 0;
 			unsigned string_id_ = 0;
 
 			SavedState save_state() const {
@@ -443,11 +465,13 @@ namespace dino::codegen {
 				}
 			}
 
-			void declare_variable(const std::string& name, VariableInfo variable) {
+			void declare_variable(const std::string& name, VariableInfo variable, bool track_cleanup = true) {
 				if (scopes_.empty()) {
 					push_scope();
 				}
-				scopes_.back().destruction_order.push_back(name);
+				if (track_cleanup) {
+					scopes_.back().destruction_order.push_back(name);
+				}
 				scopes_.back().vars[name] = std::move(variable);
 			}
 
@@ -489,6 +513,16 @@ namespace dino::codegen {
 				return llvm::Function::Create(type, llvm::Function::ExternalLinkage, "free", module_);
 			}
 
+			llvm::Function* ensure_atexit() {
+				if (llvm::Function* fn = module_.getFunction("atexit")) {
+					return fn;
+				}
+				llvm::FunctionType* type = llvm::FunctionType::get(llvm::Type::getInt32Ty(context_),
+																   {llvm::PointerType::get(context_, 0)},
+																   false);
+				return llvm::Function::Create(type, llvm::Function::ExternalLinkage, "atexit", module_);
+			}
+
 			llvm::StructType* heap_header_type() {
 				llvm::StructType* header = llvm::StructType::getTypeByName(context_, "dino.heap.header");
 				if (header != nullptr) {
@@ -507,12 +541,63 @@ namespace dino::codegen {
 				return found != structs_.end() && found->second.destructor != nullptr;
 			}
 
+			bool type_needs_static_cleanup(const SemanticType& type) const {
+				if (type.is_pointer || type.is_reference) {
+					return false;
+				}
+				if (type.is_array) {
+					return type_has_destructor(element_type(type));
+				}
+				return type_has_destructor(type);
+			}
+
 			void emit_destructor_call(const SemanticType& type, llvm::Value* address) {
 				if (address == nullptr || !type_has_destructor(type)) {
 					return;
 				}
 				const StructInfo& info = structs_.at(type.name);
 				builder_.CreateCall(info.destructor->llvm_function, {address});
+			}
+
+			void emit_static_cleanup_call(const SemanticType& type, llvm::Value* address) {
+				if (address == nullptr) {
+					return;
+				}
+				if (type.is_array) {
+					SemanticType element = element_type(type);
+					if (!type_has_destructor(element)) {
+						return;
+					}
+
+					llvm::Function* function = current_function_;
+					llvm::BasicBlock* cond_block = llvm::BasicBlock::Create(context_, "static.array.dtor.cond", function);
+					llvm::BasicBlock* body_block = llvm::BasicBlock::Create(context_, "static.array.dtor.body", function);
+					llvm::BasicBlock* end_block = llvm::BasicBlock::Create(context_, "static.array.dtor.end", function);
+					llvm::AllocaInst* index_slot = create_entry_alloca(function, llvm::Type::getInt64Ty(context_), "static.dtor.index");
+					builder_.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), type.array_size), index_slot);
+					builder_.CreateBr(cond_block);
+
+					builder_.SetInsertPoint(cond_block);
+					llvm::Value* index = builder_.CreateLoad(llvm::Type::getInt64Ty(context_), index_slot, "static.dtor.index");
+					llvm::Value* has_more = builder_.CreateICmpUGT(index,
+																   llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0),
+																   "static.dtor.has_more");
+					builder_.CreateCondBr(has_more, body_block, end_block);
+
+					builder_.SetInsertPoint(body_block);
+					llvm::Value* current = builder_.CreateSub(index,
+															  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 1),
+															  "static.dtor.current");
+					llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(type), address, {builder_.getInt32(0), current}, "static.dtor.elem");
+					emit_destructor_call(element, element_address);
+					builder_.CreateStore(current, index_slot);
+					builder_.CreateBr(cond_block);
+
+					builder_.SetInsertPoint(end_block);
+					return;
+				}
+
+				emit_destructor_call(type, address);
 			}
 
 			llvm::Value* allocate_heap_block(const SemanticType& allocated_type, llvm::Value* element_count) {
@@ -847,10 +932,12 @@ namespace dino::codegen {
 					SemanticType substituted = found->second;
 					substituted.is_const = substituted.is_const || result.is_const;
 					substituted.is_nonull = substituted.is_nonull || result.is_nonull;
-					substituted.is_pointer = result.is_pointer;
-					substituted.is_reference = result.is_reference;
-					substituted.is_array = result.is_array;
-					substituted.array_size = result.array_size;
+					substituted.is_pointer = substituted.is_pointer || result.is_pointer;
+					substituted.is_reference = substituted.is_reference || result.is_reference;
+					substituted.is_array = substituted.is_array || result.is_array;
+					if (result.is_array && result.array_size != 0) {
+						substituted.array_size = result.array_size;
+					}
 					return substituted;
 				}
 				return result;
@@ -861,14 +948,20 @@ namespace dino::codegen {
 										 const std::unordered_map<std::string, bool>& template_params,
 										 std::unordered_map<std::string, SemanticType>& bindings) const {
 				if (const auto found = template_params.find(pattern.name); found != template_params.end()) {
-					if (pattern.is_pointer != actual.is_pointer || pattern.is_reference != actual.is_reference || pattern.is_array != actual.is_array) {
+					if (!matches_template_wrapper_shape(pattern, actual)) {
 						return false;
 					}
 					SemanticType deduced = actual;
-					deduced.is_pointer = false;
-					deduced.is_reference = false;
-					deduced.is_array = false;
-					deduced.array_size = 0;
+					if (pattern.is_pointer) {
+						deduced.is_pointer = false;
+					}
+					if (pattern.is_reference) {
+						deduced.is_reference = false;
+					}
+					if (pattern.is_array) {
+						deduced.is_array = false;
+						deduced.array_size = 0;
+					}
 					if (const auto bound = bindings.find(pattern.name); bound != bindings.end()) {
 						return same_type(bound->second, deduced);
 					}
@@ -882,10 +975,14 @@ namespace dino::codegen {
 												  const std::unordered_map<std::string, SemanticType>& bindings) const {
 				if (const auto found = bindings.find(type.name); found != bindings.end()) {
 					SemanticType substituted = found->second;
-					substituted.is_pointer = type.is_pointer;
-					substituted.is_reference = type.is_reference;
-					substituted.is_array = type.is_array;
-					substituted.array_size = type.array_size;
+					substituted.is_const = substituted.is_const || type.is_const;
+					substituted.is_nonull = substituted.is_nonull || type.is_nonull;
+					substituted.is_pointer = substituted.is_pointer || type.is_pointer;
+					substituted.is_reference = substituted.is_reference || type.is_reference;
+					substituted.is_array = substituted.is_array || type.is_array;
+					if (type.is_array && type.array_size != 0) {
+						substituted.array_size = type.array_size;
+					}
 					return substituted;
 				}
 				return type;
@@ -947,9 +1044,7 @@ namespace dino::codegen {
 					}
 					for (size_t i = pack_index; i < args.size(); ++i) {
 						if (pack_template_params.contains(function_template->params[pack_index].name)) {
-							if (function_template->params[pack_index].is_pointer != args[i].is_pointer ||
-								function_template->params[pack_index].is_reference != args[i].is_reference ||
-								function_template->params[pack_index].is_array != args[i].is_array) {
+							if (!matches_template_wrapper_shape(function_template->params[pack_index], args[i])) {
 								return nullptr;
 							}
 							concrete_params.push_back(args[i]);
@@ -1193,6 +1288,88 @@ namespace dino::codegen {
 				return entry_builder.CreateAlloca(type, nullptr, name);
 			}
 
+			std::string static_local_key(const VarDeclStmt& variable) const {
+				const std::string function_name = current_function_ != nullptr ? current_function_->getName().str() : "<global>";
+				return std::format("{}:{}:{}:{}", function_name, variable.location.file, variable.location.line, variable.location.column);
+			}
+
+			StaticLocalInfo& ensure_static_local(const VarDeclStmt& variable, const SemanticType& type) {
+				const std::string key = static_local_key(variable);
+				if (const auto found = static_locals_.find(key); found != static_locals_.end()) {
+					return found->second;
+				}
+
+				StaticLocalInfo info;
+				info.type = type;
+				llvm::Type* storage_type = llvm_type(type);
+				llvm::Constant* initializer = nullptr;
+				if (type.is_array) {
+					initializer = llvm::ConstantAggregateZero::get(llvm::cast<llvm::ArrayType>(storage_type));
+				} else {
+					initializer = llvm::Constant::getNullValue(storage_type);
+				}
+				info.storage = new llvm::GlobalVariable(module_,
+														storage_type,
+														false,
+														llvm::GlobalValue::InternalLinkage,
+														initializer,
+														std::format(".static.{}", static_local_id_++));
+				info.guard = new llvm::GlobalVariable(module_,
+													  llvm::Type::getInt1Ty(context_),
+													  false,
+													  llvm::GlobalValue::InternalLinkage,
+													  llvm::ConstantInt::getFalse(context_),
+													  std::format(".static.init.{}", static_local_id_++));
+				auto [it, _] = static_locals_.emplace(key, std::move(info));
+				register_static_local_cleanup(it->second);
+				return it->second;
+			}
+
+			void register_static_local_cleanup(StaticLocalInfo& info) {
+				if (info.cleanup != nullptr || !type_needs_static_cleanup(info.type)) {
+					return;
+				}
+
+				SavedState state = save_state();
+
+				llvm::FunctionType* cleanup_type = llvm::FunctionType::get(llvm::Type::getVoidTy(context_), false);
+				llvm::Function* cleanup = llvm::Function::Create(cleanup_type,
+																 llvm::GlobalValue::InternalLinkage,
+																 std::format(".static.dtor.{}", static_local_id_++),
+																 module_);
+				info.cleanup = cleanup;
+
+				llvm::BasicBlock* entry = llvm::BasicBlock::Create(context_, "entry", cleanup);
+				llvm::BasicBlock* run_block = llvm::BasicBlock::Create(context_, "run", cleanup);
+				llvm::BasicBlock* end_block = llvm::BasicBlock::Create(context_, "end", cleanup);
+
+				builder_.SetInsertPoint(entry);
+				current_unit_ = nullptr;
+				current_struct_ = nullptr;
+				current_self_ = nullptr;
+				current_function_ = cleanup;
+				current_yield_ = nullptr;
+				scopes_.clear();
+				current_template_bindings_.clear();
+				current_pack_bindings_.clear();
+
+				llvm::Value* initialized = builder_.CreateLoad(llvm::Type::getInt1Ty(context_), info.guard, "static.cleanup.init");
+				builder_.CreateCondBr(initialized, run_block, end_block);
+
+				builder_.SetInsertPoint(run_block);
+				emit_static_cleanup_call(info.type, info.storage);
+				if (builder_.GetInsertBlock()->getTerminator() == nullptr) {
+					builder_.CreateBr(end_block);
+				}
+
+				builder_.SetInsertPoint(end_block);
+				if (builder_.GetInsertBlock()->getTerminator() == nullptr) {
+					builder_.CreateRetVoid();
+				}
+
+				restore_state(std::move(state));
+			}
+
 			void declare_structs() {
 				for (auto& [name, info]: structs_) {
 					info.llvm_type = llvm::StructType::create(context_, name);
@@ -1387,8 +1564,8 @@ namespace dino::codegen {
 			}
 
 			void bind_template_instance_parameters(const std::vector<Parameter>& parameters,
-												  FunctionInfo& info,
-												  size_t start_index = 0) {
+												   FunctionInfo& info,
+												   size_t start_index = 0) {
 				std::unordered_map<std::string, SemanticType> bindings;
 				std::unordered_map<std::string, bool> template_param_names;
 				for (const auto& param: info.template_params) {
@@ -2517,6 +2694,38 @@ namespace dino::codegen {
 				return value;
 			}
 
+			llvm::Value* promote_variadic_argument(llvm::Value* value, SemanticType& type) {
+				if (value == nullptr) {
+					return value;
+				}
+
+				if (type.is_pointer || type.is_reference || type.is_array || type.is_error) {
+					return value;
+				}
+
+				if (type.name == "float") {
+					value = builder_.CreateFPExt(value, llvm::Type::getDoubleTy(context_), "vararg.fp.extend");
+					type.name = "double";
+					return value;
+				}
+
+				if (is_integer_type(type)) {
+					const unsigned bits = integer_bit_width(type);
+					if (bits < 32) {
+						SemanticType promoted = type;
+						if (type.name == "bool" || type.name == "char" || type.name == "uint8" || type.name == "uint16") {
+							promoted.name = "int32";
+						} else {
+							promoted.name = "int32";
+						}
+						value = builder_.CreateIntCast(value, llvm_type(promoted), is_signed_integer_type(type), "vararg.int.extend");
+						type = promoted;
+					}
+				}
+
+				return value;
+			}
+
 			llvm::Value* materialize_address(llvm::Value* value, const SemanticType& type, const std::string& name) {
 				if (value == nullptr) {
 					return nullptr;
@@ -2785,6 +2994,8 @@ namespace dino::codegen {
 					if (!resolution.function->variadic || i < resolution.function->params.size()) {
 						const SemanticType& expected_type = resolution.function->params[i];
 						value = cast_value(value, actual_type, expected_type, true);
+					} else {
+						value = promote_variadic_argument(value, actual_type);
 					}
 					args.push_back(value);
 				}
@@ -2851,6 +3062,49 @@ namespace dino::codegen {
 
 			void emit_var_decl(const VarDeclStmt& variable) {
 				SemanticType type = from_typeref(variable.type);
+				if (variable.is_static) {
+					if (variable.is_array) {
+						type.is_array = true;
+						type.array_size = variable.array_init.size();
+					}
+					StaticLocalInfo& info = ensure_static_local(variable, type);
+					declare_variable(variable.name, VariableInfo{type, info.storage, false}, false);
+					if (variable.init == nullptr && variable.array_init.empty()) {
+						return;
+					}
+
+					llvm::Value* initialized = builder_.CreateLoad(llvm::Type::getInt1Ty(context_), info.guard, variable.name + ".static.init");
+					llvm::Function* function = current_function_;
+					llvm::BasicBlock* init_block = llvm::BasicBlock::Create(context_, variable.name + ".static.init.body", function);
+					llvm::BasicBlock* cont_block = llvm::BasicBlock::Create(context_, variable.name + ".static.init.cont", function);
+					builder_.CreateCondBr(initialized, cont_block, init_block);
+
+					builder_.SetInsertPoint(init_block);
+					if (variable.is_array) {
+						for (size_t i = 0; i < variable.array_init.size(); ++i) {
+							llvm::Value* init_value = emit_expression(variable.array_init[i].get());
+							SemanticType init_type = infer_expr_type(variable.array_init[i].get());
+							init_value = cast_value(init_value, init_type, element_type(type), true);
+							llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(type),
+																					  info.storage,
+																					  {builder_.getInt32(0), builder_.getInt32(static_cast<int>(i))},
+																					  variable.name + ".static.elem");
+							builder_.CreateStore(init_value, element_address);
+						}
+					} else if (variable.init) {
+						llvm::Value* init_value = emit_expression(variable.init.get());
+						SemanticType init_type = infer_expr_type(variable.init.get());
+						builder_.CreateStore(cast_value(init_value, init_type, type, true), info.storage);
+					}
+					builder_.CreateStore(llvm::ConstantInt::getTrue(context_), info.guard);
+					if (type_needs_static_cleanup(type) && info.cleanup != nullptr) {
+						builder_.CreateCall(ensure_atexit(), {info.cleanup});
+					}
+					builder_.CreateBr(cont_block);
+					builder_.SetInsertPoint(cont_block);
+					return;
+				}
+
 				if (variable.is_array) {
 					type.is_array = true;
 					type.array_size = variable.array_init.size();

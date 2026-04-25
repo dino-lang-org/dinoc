@@ -128,6 +128,19 @@ namespace dino::frontend {
 			return pattern.is_pointer == actual.is_pointer && pattern.is_reference == actual.is_reference && pattern.is_array == actual.is_array;
 		}
 
+		bool matches_template_wrapper_shape(const SemanticType& pattern, const SemanticType& actual) {
+			if (pattern.is_pointer && !actual.is_pointer) {
+				return false;
+			}
+			if (pattern.is_reference && !actual.is_reference) {
+				return false;
+			}
+			if (pattern.is_array && !actual.is_array) {
+				return false;
+			}
+			return true;
+		}
+
 		std::string type_to_string(const SemanticType& t) {
 			if (t.is_error) {
 				return "<error>";
@@ -767,11 +780,17 @@ namespace dino::frontend {
 										 std::unordered_map<std::string, SemanticType>& bindings) const {
 				if (template_names.contains(pattern.name)) {
 					SemanticType deduced = actual;
-					deduced.is_pointer = false;
-					deduced.is_reference = false;
-					deduced.is_array = false;
-					if (!same_template_param_shape(pattern, actual)) {
+					if (!matches_template_wrapper_shape(pattern, actual)) {
 						return false;
+					}
+					if (pattern.is_pointer) {
+						deduced.is_pointer = false;
+					}
+					if (pattern.is_reference) {
+						deduced.is_reference = false;
+					}
+					if (pattern.is_array) {
+						deduced.is_array = false;
 					}
 					const auto found = bindings.find(pattern.name);
 					if (found == bindings.end()) {
@@ -834,7 +853,7 @@ namespace dino::frontend {
 					const SemanticType& pack_pattern = sig.params[pack_index];
 					for (size_t i = pack_index; i < args.size(); ++i) {
 						if (pack_template_names.contains(pack_pattern.name)) {
-							if (!same_template_param_shape(pack_pattern, args[i])) {
+							if (!matches_template_wrapper_shape(pack_pattern, args[i])) {
 								return std::nullopt;
 							}
 							continue;

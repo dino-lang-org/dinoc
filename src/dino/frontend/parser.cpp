@@ -166,6 +166,10 @@ namespace dino::frontend {
 				}
 
 				if (looks_like_var_decl_stmt()) {
+					if (check(TokenType::KwStatic)) {
+						error(current(), "Keyword 'static' is only allowed on struct members and local variables");
+						return nullptr;
+					}
 					if (!template_params.empty()) {
 						error(current(), "Template parameters are not allowed on global variables");
 					}
@@ -756,6 +760,7 @@ namespace dino::frontend {
 			}
 
 			StmtPtr parse_var_decl_stmt(bool semicolon_consumed = false) {
+				const bool is_static = match(TokenType::KwStatic);
 				TypeRef type = parse_type_ref();
 				auto name = expect(TokenType::Identifier, "Expected variable name");
 				if (!name) {
@@ -766,6 +771,7 @@ namespace dino::frontend {
 				st->location = name->location;
 				st->type = std::move(type);
 				st->name = name->lexeme;
+				st->is_static = is_static;
 
 				if (match(TokenType::LBracket)) {
 					expect(TokenType::RBracket, "Expected '[' after array name");
@@ -1224,10 +1230,13 @@ namespace dino::frontend {
 			}
 
 			[[nodiscard]] bool looks_like_var_decl_stmt() const {
-				if (!is_type_start(current())) {
+				size_t i = pos_;
+				if (at(i).type == TokenType::KwStatic) {
+					++i;
+				}
+				if (!is_type_start(at(i))) {
 					return false;
 				}
-				size_t i = pos_;
 				consume_type_preview(i);
 				if (at(i).type != TokenType::Identifier) {
 					return false;

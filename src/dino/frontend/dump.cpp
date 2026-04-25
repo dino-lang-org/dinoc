@@ -203,7 +203,7 @@ namespace dino::frontend {
 				return;
 			}
 			if (const auto* s = dynamic_cast<const VarDeclStmt*>(stmt)) {
-				os << " name=" << s->name << " type=" << describe_type(s->type) << "\n";
+				os << " name=" << s->name << " type=" << describe_type(s->type) << (s->is_static ? " static" : "") << "\n";
 				if (s->init) {
 					dump_expr(s->init.get(), os, level + 1);
 				}
@@ -339,7 +339,8 @@ namespace dino::frontend {
 				}
 				for (const auto& m: st->methods) {
 					os << "    Method access=" << to_string(m.access) << " name=" << m.name << " returns=" << describe_type(m.return_type)
-					   << (m.is_static ? " static" : "") << describe_attributes(m.attributes) << "\n";
+					   << describe_template_params(m.template_params) << (m.is_static ? " static" : "") << describe_attributes(m.attributes)
+					   << "\n";
 					if (m.body) {
 						dump_stmt(m.body.get(), os, 3);
 					}
