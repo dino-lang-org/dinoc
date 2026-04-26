@@ -2,7 +2,7 @@
 
 #include <ostream>
 
-#include "dino/codegen/backend.hpp"
+#include "dino/cli/linker.hpp"
 
 namespace dino::cli {
 
@@ -12,20 +12,16 @@ namespace dino::cli {
 			return 1;
 		}
 
-		codegen::BackendOptions backend_options;
-		backend_options.is_library = false;
-		backend_options.library_paths = options.library_paths;
-		backend_options.link_libraries = options.link_libraries;
-		backend_options.executable_output_file = options.output_file;
+		LinkerArgs linker_args;
+		linker_args.flavor = detect_host_linker();
+		linker_args.object_files = options.object_files;
+		linker_args.output_file = options.output_file;
+		linker_args.library_paths = options.library_paths;
+		linker_args.link_libraries = options.link_libraries;
+		linker_args.is_dynamic_library = options.is_dynamic_library;
+		linker_args.is_static_library = options.is_static_library;
 
-		codegen::LLVMBackend backend(backend_options);
-
-		if (options.object_files.size() == 1) {
-			if (!backend.link_executable(options.object_files[0], options.output_file, err)) {
-				return 1;
-			}
-		} else {
-			err << "Linking multiple object files is not yet fully implemented\n";
+		if (!invoke_linker(linker_args, out, err)) {
 			return 1;
 		}
 

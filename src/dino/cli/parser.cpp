@@ -29,7 +29,8 @@ namespace dino::cli {
 						 "  -o <file>              Output executable/library file\n"
 						 "  -L <path>              Add library search path\n"
 						 "  -l <lib>               Link with library\n"
-						 "  -statlib               Create static library (no entry point check)\n";
+						 "  -lib                   Create dynamic library\n"
+						 "  -statlib               Create static library (placeholder)\n";
 		}
 
 		ParsedCommand parse_compile_command(int argc, char** argv, int start_idx) {
@@ -101,6 +102,8 @@ namespace dino::cli {
 					options.link_libraries.emplace_back(argv[++i]);
 				} else if (arg == "-statlib") {
 					options.is_static_library = true;
+				} else if (arg == "-lib") {
+					options.is_dynamic_library = true;
 				} else if (!arg.empty() && arg[0] != '-') {
 					options.object_files.emplace_back(arg);
 				} else {
@@ -115,7 +118,13 @@ namespace dino::cli {
 			}
 
 			if (options.output_file.empty()) {
-				options.output_file = options.is_static_library ? "lib.a" : "a.out";
+				if (options.is_static_library) {
+					options.output_file = "lib.a";
+				} else if (options.is_dynamic_library) {
+					options.output_file = "lib.dll";
+				} else {
+					options.output_file = "a.out";
+				}
 			}
 
 			result.options = options;

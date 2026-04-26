@@ -43,7 +43,7 @@ llvm_map_components_to_libnames(LLVM_LIBS
 
 add_executable(dinoc)
 target_include_directories(dinoc PUBLIC "src" ${LLVM_INCLUDE_DIRS} ${LLD_INCLUDE_DIRS})
-target_link_libraries(dinoc PRIVATE ${LLVM_LIBS} lldCommon lldELF lldCOFF)
+target_link_libraries(dinoc PRIVATE ${LLVM_LIBS} lldCommon lldELF lldCOFF lldMachO lldMinGW)
 if (WIN32)
     target_compile_definitions(dinoc PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif ()
@@ -53,6 +53,7 @@ target_sources(dinoc PRIVATE
         "src/dino/cli/parser.cpp"
         "src/dino/cli/compile.cpp"
         "src/dino/cli/link.cpp"
+        "src/dino/cli/linker.cpp"
 
         "src/dino/codegen/backend.cpp"
 
