@@ -810,7 +810,7 @@ namespace dino::frontend {
 				} else if (!match(TokenType::Semicolon)) {
 					if (!(check(TokenType::KwElse) || check(TokenType::KwCase) || check(TokenType::KwDefault) || check(TokenType::RBrace) ||
 						  check(TokenType::EndOfFile))) {
-						expect(TokenType::Semicolon, "Expeced ';' after variable declaration");
+						expect(TokenType::Semicolon, "Expected ';' after variable declaration");
 					}
 				}
 
@@ -1411,6 +1411,37 @@ namespace dino::frontend {
 		}
 
 		return fs::weakly_canonical(candidate).string();
+	}
+
+	std::string resolve_include_path_with_search_paths(const std::string& include_path, const std::string& current_file,
+														const std::vector<std::string>& search_paths) {
+		fs::path include = include_path;
+		if (include.extension().empty()) {
+			include += ".dino";
+		}
+
+		fs::path current = fs::path(current_file).parent_path();
+		fs::path candidate = current / include;
+		if (fs::exists(candidate)) {
+			return fs::weakly_canonical(candidate).string();
+		}
+
+		for (const auto& search_path: search_paths) {
+			fs::path search_candidate = fs::path(search_path) / include;
+			if (fs::exists(search_candidate)) {
+				return fs::weakly_canonical(search_candidate).string();
+			}
+		}
+
+		if (fs::exists(include)) {
+			return fs::weakly_canonical(include).string();
+		}
+
+		return fs::weakly_canonical(candidate).string();
+	}
+
+	std::string ParserDriver::resolve_include_path(const std::string& include_path, const std::string& current_file) const {
+		return resolve_include_path_with_search_paths(include_path, current_file, include_paths_);
 	}
 
 	ParseResult ParserDriver::parse_entry(const std::string& entry_path) {

@@ -3,9 +3,11 @@
 #endif
 
 #include <iostream>
-#include <string>
+#include <variant>
 
-#include "dino/frontend/driver.hpp"
+#include "dino/cli/compile.hpp"
+#include "dino/cli/link.hpp"
+#include "dino/cli/parser.hpp"
 
 int main(int argc, char** argv) {
 #ifdef _WIN32
@@ -13,70 +15,27 @@ int main(int argc, char** argv) {
 	SetConsoleCP(CP_UTF8);
 #endif
 
-	dino::frontend::FrontendOptions options;
+	dino::cli::ParsedCommand cmd = dino::cli::parse_command_line(argc, argv);
 
-	for (int i = 1; i < argc; ++i) {
-		const std::string arg = argv[i];
-		if (arg == "--dump-tokens") {
-			options.dump_tokens = true;
-			continue;
-		}
-		if (arg == "--dump-ast") {
-			options.dump_ast = true;
-			continue;
-		}
-		if (arg == "--tokens-out" && i + 1 < argc) {
-			options.token_output_file = std::string(argv[++i]);
-			continue;
-		}
-		if (arg == "--ast-out" && i + 1 < argc) {
-			options.ast_output_file = std::string(argv[++i]);
-			continue;
-		}
-		if (arg == "--emit-llvm") {
-			options.emit_llvm = true;
-			continue;
-		}
-		if (arg == "--target-os" && i + 1 < argc) {
-			options.target_os = std::string(argv[++i]);
-			continue;
-		}
-		if (arg == "--target-arch" && i + 1 < argc) {
-			options.target_arch = std::string(argv[++i]);
-			continue;
-		}
-		if (arg == "--target-build-type" && i + 1 < argc) {
-			options.target_build_type = std::string(argv[++i]);
-			continue;
-		}
-		if (arg == "--llvm-out" && i + 1 < argc) {
-			options.emit_llvm = true;
-			options.llvm_output_file = std::string(argv[++i]);
-			continue;
-		}
-		if ((arg == "-o" || arg == "--object-out") && i + 1 < argc) {
-			options.object_output_file = std::string(argv[++i]);
-			continue;
-		}
-		if (arg == "-h" || arg == "--help") {
-			std::cout << "dinoc <entry.dino> [--dump-tokens] [--tokens-out <file>] [--dump-ast] [--ast-out <file>] "
-						 "[--emit-llvm] [--llvm-out <file>] [-o <file>] [--target-os <os>] "
-						 "[--target-arch <arch>] [--target-build-type <debug|release>]\n";
-			return 0;
-		}
-		if (!arg.empty() && arg[0] != '-') {
-			options.entry_file = arg;
-			continue;
-		}
-
-		std::cerr << "Unknown argument: " << arg << "\n";
+	if (!cmd.error_message.empty()) {
+		std::cerr << "Error: " << cmd.error_message << "\n";
 		return 2;
 	}
 
-	if (options.entry_file.empty()) {
-		std::cerr << "Entry file is required. Example: dinoc examples/main.dino --emit-llvm --llvm-out out.ll\n";
-		return 2;
+	if (cmd.type == dino::cli::CommandType::Help) {
+		return 0;
 	}
 
-	return dino::frontend::run_frontend(options, std::cout, std::cerr);
+	if (cmd.type == dino::cli::CommandType::Compile) {
+		const auto& options = std::get<dino::cli::CompileOptions>(cmd.options);
+		return dino::cli::run_compile(options, std::cout, std::cerr);
+	}
+
+	if (cmd.type == dino::cli::CommandType::Link) {
+		const auto& options = std::get<dino::cli::LinkOptions>(cmd.options);
+		return dino::cli::run_link(options, std::cout, std::cerr);
+	}
+
+	std::cerr << "No command specified. Use --help for usage information.\n";
+	return 2;
 }

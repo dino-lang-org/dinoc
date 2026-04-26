@@ -1,16 +1,18 @@
-#include "dino/frontend/driver.hpp"
+#include "dino/cli/compile.hpp"
 
-#include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
+#include <string>
 
 #include "dino/codegen/backend.hpp"
 #include "dino/frontend/dump.hpp"
 #include "dino/frontend/lexer.hpp"
+#include "dino/frontend/parser.hpp"
 #include "dino/frontend/sema.hpp"
 #include "dino/frontend/target.hpp"
 
-namespace dino::frontend {
+namespace dino::cli {
 	namespace {
 
 		std::string read_file(const std::string& path) {
@@ -34,35 +36,39 @@ namespace dino::frontend {
 
 	} // namespace
 
-	int run_frontend(const FrontendOptions& options, std::ostream& out, std::ostream& err) {
-		TargetInfo target = detect_host_target();
-		if (options.target_os.has_value()) {
-			if (!is_supported_target_os(*options.target_os)) {
-				err << "Unsupported target os: " << *options.target_os << "\n";
+	int run_compile(const CompileOptions& options, std::ostream& out, std::ostream& err) {
+		frontend::TargetInfo target = frontend::detect_host_target();
+
+		if (!options.target_os.empty()) {
+			if (!frontend::is_supported_target_os(options.target_os)) {
+				err << "Unsupported target os: " << options.target_os << "\n";
 				return 2;
 			}
-			target.os = *options.target_os;
+			target.os = options.target_os;
 		}
-		if (options.target_arch.has_value()) {
-			if (!is_supported_target_arch(*options.target_arch)) {
-				err << "Unsupported target arch: " << *options.target_arch << "\n";
+		if (!options.target_arch.empty()) {
+			if (!frontend::is_supported_target_arch(options.target_arch)) {
+				err << "Unsupported target arch: " << options.target_arch << "\n";
 				return 2;
 			}
-			target.arch = *options.target_arch;
+			target.arch = options.target_arch;
 		}
-		if (options.target_build_type.has_value()) {
-			if (!is_supported_target_build_type(*options.target_build_type)) {
-				err << "Unsupported target build type: " << *options.target_build_type << "\n";
+		if (!options.target_build_type.empty()) {
+			if (!frontend::is_supported_target_build_type(options.target_build_type)) {
+				err << "Unsupported target build type: " << options.target_build_type << "\n";
 				return 2;
 			}
-			target.build_type = *options.target_build_type;
+			target.build_type = options.target_build_type;
 		}
 
-		ParserDriver driver(target);
-		ParseResult result = driver.parse_entry(options.entry_file);
-		TypeCheckResult type_result;
+		frontend::ParserDriver driver(target);
+		for (const auto& include_path : options.include_paths) {
+			driver.add_include_path(include_path);
+		}
+		frontend::ParseResult result = driver.parse_entry(options.source_file);
+		frontend::TypeCheckResult type_result;
 		if (result.ok()) {
-			type_result = type_check(result.units);
+			type_result = frontend::type_check(result.units);
 		}
 
 		for (const auto& e: result.errors) {
@@ -82,23 +88,25 @@ namespace dino::frontend {
 			std::ostringstream token_ss;
 			for (const auto& [path, unit]: result.units) {
 				const std::string src = read_file(path);
-				Lexer lexer(path, src);
+				frontend::Lexer lexer(path, src);
 				auto tokens = lexer.tokenize();
-				dump_tokens(tokens, token_ss);
+				frontend::dump_tokens(tokens, token_ss);
 				token_ss << "\n";
 			}
-			write_text(options.token_output_file, token_ss.str(), out);
+			std::string file = options.token_output_file.empty() ? std::string() : options.token_output_file;
+			write_text(file.empty() ? std::nullopt : std::optional<std::string>(file), token_ss.str(), out);
 		}
 
 		if (options.dump_ast) {
-			std::vector<const TranslationUnit*> units;
+			std::vector<const frontend::TranslationUnit*> units;
 			units.reserve(result.units.size());
 			for (const auto& [_, unit]: result.units) {
 				units.push_back(unit.get());
 			}
 			std::ostringstream ast_ss;
-			dump_all_asts(units, ast_ss);
-			write_text(options.ast_output_file, ast_ss.str(), out);
+			frontend::dump_all_asts(units, ast_ss);
+			std::string file = options.ast_output_file.empty() ? std::string() : options.ast_output_file;
+			write_text(file.empty() ? std::nullopt : std::optional<std::string>(file), ast_ss.str(), out);
 		}
 
 		if (!(result.ok() && type_result.ok())) {
@@ -106,22 +114,13 @@ namespace dino::frontend {
 		}
 
 		codegen::BackendOptions backend_options;
-		backend_options.is_library = (options.output_mode == OutputMode::StaticLibrary);
-		backend_options.library_paths = options.library_paths;
-		backend_options.link_libraries = options.link_libraries;
+		backend_options.is_library = true;
 
-		if (options.output_mode == OutputMode::LLVMIR) {
-			backend_options.llvm_output_file = options.output_file;
+		if (!options.llvm_output_file.empty()) {
+			backend_options.llvm_output_file = options.llvm_output_file;
 		}
 
-		std::string object_file;
-		if (options.output_mode == OutputMode::Object || options.output_mode == OutputMode::StaticLibrary) {
-			backend_options.object_output_file = options.output_file;
-		} else if (options.output_mode == OutputMode::Executable) {
-			object_file = "tmp_main.obj";
-			backend_options.object_output_file = object_file;
-			backend_options.executable_output_file = options.output_file.value_or("a.out");
-		}
+		backend_options.object_output_file = options.output_file;
 
 		codegen::LLVMBackend backend(backend_options);
 		if (!backend.generate(result.units, err)) {
@@ -136,13 +135,8 @@ namespace dino::frontend {
 		if (backend_options.object_output_file.has_value() && !backend.write_object(*backend_options.object_output_file, err)) {
 			return 1;
 		}
-		if (backend_options.executable_output_file.has_value() && !object_file.empty()) {
-			if (!backend.link_executable(object_file, *backend_options.executable_output_file, err)) {
-				return 1;
-			}
-		}
 
 		return 0;
 	}
 
-} // namespace dino::frontend
+} // namespace dino::cli

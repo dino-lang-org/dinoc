@@ -3363,18 +3363,25 @@ namespace dino::codegen {
 		llvm::raw_string_ostream stream(ir);
 		module_->print(stream, nullptr);
 		stream.flush();
-
-		if (options_.llvm_output_file.has_value()) {
-			std::ofstream file(*options_.llvm_output_file, std::ios::binary);
-			if (!file) {
-				err << "Failed to open LLVM IR output file: " << *options_.llvm_output_file << "\n";
-				return false;
-			}
-			file << ir;
-			return true;
-		}
-
 		out << ir;
+		return true;
+	}
+
+	bool LLVMBackend::write_ir_to_file(const std::string& output_path, std::ostream& err) const {
+		if (!module_) {
+			err << "LLVM module was not generated\n";
+			return false;
+		}
+		std::ofstream file(output_path, std::ios::binary);
+		if (!file) {
+			err << "Failed to open LLVM IR output file: " << output_path << "\n";
+			return false;
+		}
+		std::string ir;
+		llvm::raw_string_ostream stream(ir);
+		module_->print(stream, nullptr);
+		stream.flush();
+		file << ir;
 		return true;
 	}
 
@@ -3418,6 +3425,18 @@ namespace dino::codegen {
 		pass_manager.run(*module_);
 		dest.flush();
 		return true;
+	}
+
+	bool LLVMBackend::link_executable(const std::string& object_path, const std::string& output_path, std::ostream& err) const {
+		// TODO: Implement linking using LLD
+		// For now, just inform the user to link manually
+		err << "Linking not yet implemented. Please link manually:\n";
+#ifdef _WIN32
+		err << "  link.exe " << object_path << " /OUT:" << output_path << " /SUBSYSTEM:CONSOLE /ENTRY:main\n";
+#else
+		err << "  ld " << object_path << " -o " << output_path << " -lc\n";
+#endif
+		return false;
 	}
 
 } // namespace dino::codegen
