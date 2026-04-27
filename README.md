@@ -2,7 +2,7 @@
 > An experiment to create a compiler for programming language by AI
 
 # What does it do?
-> Now it can compile source code to the object files – you need to link it to the executable
+> Now it can compile source code to the object files and link simple programs! Examples will be soon(ig)..
 
 # Hello World in Dino
 ```dino
