@@ -1,31 +1,17 @@
 #include "dino/codegen/backend.hpp"
 
-
-
 #include <filesystem>
-
 #include <format>
-
 #include <fstream>
-
 #include <memory>
-
 #include <optional>
-
 #include <ranges>
-
 #include <sstream>
-
 #include <string>
-
 #include <string_view>
-
 #include <unordered_map>
-
 #include <utility>
-
 #include <vector>
-
 
 
 #include <llvm/ADT/APFloat.h>
@@ -681,7 +667,6 @@ namespace dino::codegen {
 
 
 			bool generate(const std::unordered_map<std::string, std::unique_ptr<TranslationUnit>>& units) {
-
 				units_ = &units;
 
 				initialize_target_info();
@@ -691,7 +676,6 @@ namespace dino::codegen {
 					return false;
 
 				}
-
 				build_symbols();
 
 				if (!errors_.empty()) {
@@ -701,7 +685,6 @@ namespace dino::codegen {
 					return false;
 
 				}
-
 				declare_structs();
 
 				define_struct_layouts();
@@ -1255,8 +1238,12 @@ namespace dino::codegen {
 
 
 			llvm::Value* allocate_heap_block(const SemanticType& allocated_type, llvm::Value* element_count) {
-
 				llvm::Type* element_llvm_type = llvm_type(allocated_type);
+
+				if (element_llvm_type == nullptr || element_llvm_type == llvm::Type::getVoidTy(context_)) {
+					errors_.push_back(std::format("Cannot allocate heap block for type '{}'", type_to_string(allocated_type)));
+					return nullptr;
+				}
 
 				const llvm::DataLayout& layout = module_.getDataLayout();
 
@@ -1925,20 +1912,27 @@ namespace dino::codegen {
 							// Substitute template parameters in fields
 
 							for (auto& field_info: inst_struct.fields) {
-
 								for (size_t i = 0; i < base_struct.template_params.size(); ++i) {
-
 									if (field_info.type.name == base_struct.template_params[i].name) {
-
 										field_info.type.name = args[i];
-
 										break;
-
 									}
-
 								}
-
 							}
+
+							// Clear constructors, methods, and destructor for now to avoid AST cloning issues
+							// The method bodies still reference template parameter names in the AST
+							inst_struct.constructors.clear();
+							inst_struct.destructor = nullptr;
+							inst_struct.methods.clear();
+
+							// Define struct layout immediately to avoid ASAN crash in getTypeAllocSize
+							std::vector<llvm::Type*> field_types;
+							field_types.reserve(inst_struct.fields.size());
+							for (const auto& field: inst_struct.fields) {
+								field_types.push_back(llvm_type(field.type));
+							}
+							inst_struct.llvm_type->setBody(field_types);
 
 							structs_[type.name] = std::move(inst_struct);
 
@@ -3076,17 +3070,20 @@ namespace dino::codegen {
 
 				for (auto& [name, info]: structs_) {
 
-					std::vector<llvm::Type*> field_types;
+					// Skip structs that already have their body defined (e.g., template instances created in llvm_type)
+					if (info.llvm_type->isOpaque()) {
+						std::vector<llvm::Type*> field_types;
 
-					field_types.reserve(info.fields.size());
+						field_types.reserve(info.fields.size());
 
-					for (const auto& field: info.fields) {
+						for (const auto& field: info.fields) {
 
-						field_types.push_back(llvm_type(field.type));
+							field_types.push_back(llvm_type(field.type));
 
+						}
+
+						info.llvm_type->setBody(field_types, false);
 					}
-
-					info.llvm_type->setBody(field_types, false);
 
 				}
 
@@ -3156,6 +3153,19 @@ namespace dino::codegen {
 
 						continue;
 
+					}
+
+					// Skip defining functions for template structs (they have template parameters)
+					if (!function->owner.empty() && structs_.contains(function->owner)) {
+						const StructInfo& owner = structs_.at(function->owner);
+						// Skip base template structs (have template params but not instances)
+						if (!owner.template_params.empty() && !owner.is_template_instance) {
+							continue;
+						}
+						// Skip template instances (we cleared their AST references to avoid template parameter issues)
+						if (owner.is_template_instance) {
+							continue;
+						}
 					}
 
 					if (function->function != nullptr) {
@@ -3957,9 +3967,22 @@ namespace dino::codegen {
 					CallResolution resolution = resolve_call(call);
 
 					if (resolution.function != nullptr) {
-
 						return resolution.function->return_type;
 
+					}
+
+					// For template instance constructor calls that couldn't be resolved (constructors cleared),
+					// infer the type from the callee identifier by constructing full name from template_args
+					if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(call->callee.get())) {
+						if (!identifier->template_args.empty()) {
+							std::string full_name = identifier->name + "<";
+							for (size_t i = 0; i < identifier->template_args.size(); ++i) {
+								if (i > 0) full_name += ",";
+								full_name += identifier->template_args[i].name;
+							}
+							full_name += ">";
+							return SemanticType{full_name, false, false, false, false, false};
+						}
 					}
 
 				}
@@ -5256,6 +5279,15 @@ namespace dino::codegen {
 
 					if (ctor == nullptr) {
 
+						// For template instances, we may not have constructors defined (cleared to avoid AST issues)
+						// Zero-initialize the struct as a fallback
+						if (struct_it->second.is_template_instance) {
+							llvm::Value* casted_storage = builder_.CreateBitCast(storage, llvm::PointerType::get(struct_it->second.llvm_type, 0), "storage.cast");
+							llvm::Value* zero = llvm::Constant::getNullValue(struct_it->second.llvm_type);
+							builder_.CreateStore(zero, casted_storage);
+							return storage;
+						}
+
 						errors_.push_back(std::format("Unable to resolve constructor for new {}", allocated_type.name));
 
 						return storage;
@@ -5808,6 +5840,30 @@ namespace dino::codegen {
 
 					}
 
+					// Handle template instantiation like Array<int32>
+					// First check if the name itself is a template instantiation (e.g., "Array<int32>")
+					if (const auto parsed = parse_template_instantiation(identifier->name)) {
+						const auto& [base_name, args] = *parsed;
+						if (const auto struct_it = structs_.find(identifier->name); struct_it != structs_.end()) {
+							resolution.function = choose_overload(struct_it->second.constructors, arg_types);
+							return resolution;
+						}
+					}
+					// Also handle case where template_args are stored separately but name is base name
+					if (!identifier->template_args.empty()) {
+						std::string full_name = identifier->name + "<";
+						for (size_t i = 0; i < identifier->template_args.size(); ++i) {
+							if (i > 0) full_name += ",";
+							full_name += identifier->template_args[i].name;
+						}
+						full_name += ">";
+						if (const auto struct_it = structs_.find(full_name); struct_it != structs_.end()) {
+							resolution.function = choose_overload(struct_it->second.constructors, arg_types);
+							return resolution;
+						}
+					}
+
+					// Only check for base struct if no template instantiation was found
 					if (const auto struct_it = structs_.find(identifier->name); struct_it != structs_.end()) {
 
 						resolution.function = choose_overload(struct_it->second.constructors, arg_types);
@@ -6067,6 +6123,44 @@ namespace dino::codegen {
 				CallResolution resolution = resolve_call(&call);
 
 				if (resolution.function == nullptr || resolution.function->llvm_function == nullptr) {
+
+					// For template instance constructor calls that couldn't be resolved (constructors cleared),
+					// return a zero-initialized value
+					if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(call.callee.get())) {
+						if (const auto parsed = parse_template_instantiation(identifier->name)) {
+							const auto& [base_name, args] = *parsed;
+							if (const auto struct_it = structs_.find(identifier->name); struct_it != structs_.end()) {
+								// Allocate space for the struct and zero-initialize it
+								llvm::Value* storage = allocate_heap_block(SemanticType{identifier->name, false, false, false, false, false},
+																		  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 1));
+								if (storage != nullptr) {
+									llvm::Value* casted_storage = builder_.CreateBitCast(storage, llvm::PointerType::get(struct_it->second.llvm_type, 0), "storage.cast");
+									llvm::Value* zero = llvm::Constant::getNullValue(struct_it->second.llvm_type);
+									builder_.CreateStore(zero, casted_storage);
+									return storage;
+								}
+							}
+						}
+						// Also try constructing from template_args
+						if (!identifier->template_args.empty()) {
+							std::string full_name = identifier->name + "<";
+							for (size_t i = 0; i < identifier->template_args.size(); ++i) {
+								if (i > 0) full_name += ",";
+								full_name += identifier->template_args[i].name;
+							}
+							full_name += ">";
+							if (const auto struct_it = structs_.find(full_name); struct_it != structs_.end()) {
+								llvm::Value* storage = allocate_heap_block(SemanticType{full_name, false, false, false, false, false},
+																		  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 1));
+								if (storage != nullptr) {
+									llvm::Value* casted_storage = builder_.CreateBitCast(storage, llvm::PointerType::get(struct_it->second.llvm_type, 0), "storage.cast");
+									llvm::Value* zero = llvm::Constant::getNullValue(struct_it->second.llvm_type);
+									builder_.CreateStore(zero, casted_storage);
+									return storage;
+								}
+							}
+						}
+					}
 
 					std::string callee = call.callee != nullptr ? call.callee->kind() : "<null>";
 

@@ -336,6 +336,8 @@ namespace dino::frontend {
 
 			SemanticType t;
 
+			// The parser already constructs the full type name with template arguments in ref.name
+			// So we just use it directly
 			t.name = ref.name;
 
 			t.is_const = ref.is_const;
