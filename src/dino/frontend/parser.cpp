@@ -548,6 +548,25 @@ namespace dino::frontend {
 					return type;
 				}
 
+				if (check(TokenType::Less)) {
+					advance();
+					while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
+						TypeRef arg = parse_type_ref();
+						if (arg.name != "<error>") {
+							type.name += "<" + arg.name;
+							while (match(TokenType::Comma)) {
+								TypeRef next_arg = parse_type_ref();
+								if (next_arg.name != "<error>") {
+									type.name += "," + next_arg.name;
+								}
+							}
+							type.name += ">";
+						}
+						break;
+					}
+					expect(TokenType::Greater, "Expected '>' after template arguments");
+				}
+
 				while (true) {
 					if (match(TokenType::Star)) {
 						type.pointer_depth++;
@@ -1151,6 +1170,16 @@ namespace dino::frontend {
 					auto id = std::make_unique<IdentifierExpr>();
 					id->location = previous().location;
 					id->name = previous().lexeme;
+					if (check(TokenType::Less)) {
+						advance();
+						while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
+							id->template_args.push_back(parse_type_ref());
+							if (!match(TokenType::Comma)) {
+								break;
+							}
+						}
+						expect(TokenType::Greater, "Expected '>' after template arguments");
+					}
 					return id;
 				}
 				if (match(TokenType::LParen)) {
@@ -1295,6 +1324,20 @@ namespace dino::frontend {
 				}
 				if (is_builtin_type(at(idx).type) || at(idx).type == TokenType::Identifier) {
 					++idx;
+					if (at(idx).type == TokenType::Less) {
+						++idx;
+						while (at(idx).type != TokenType::Greater && at(idx).type != TokenType::EndOfFile) {
+							consume_type_preview(idx);
+							if (at(idx).type == TokenType::Comma) {
+								++idx;
+							} else {
+								break;
+							}
+						}
+						if (at(idx).type == TokenType::Greater) {
+							++idx;
+						}
+					}
 				}
 				while (at(idx).type == TokenType::Star || at(idx).type == TokenType::And) {
 					++idx;
@@ -1398,7 +1441,7 @@ namespace dino::frontend {
 				final_format_msg += "Src=";
 				final_format_msg += src_location.file_name();
 				final_format_msg += ":";
-				final_format_msg += src_location.line();
+				final_format_msg += std::to_string(src_location.line());
 				final_format_msg += ": ";
 #endif
 				final_format_msg += format;
