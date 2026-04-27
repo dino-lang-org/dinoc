@@ -5,6 +5,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <source_location>
 #include <utility>
 
 #include "dino/frontend/lexer.hpp"
@@ -90,7 +91,7 @@ namespace dino::frontend {
 						expect(TokenType::RParen, "Expected ')' after req expression");
 						expect(TokenType::RBracket, "Expected ']' after req expression");
 					} else {
-						error(*name, "Unknown attribute '{}'", name->lexeme);
+						error(std::source_location::current(), *name, "Unknown attribute '{}'", name->lexeme);
 						expect(TokenType::RBracket, "Expected ']'");
 					}
 				}
@@ -104,7 +105,7 @@ namespace dino::frontend {
 				if (match(TokenType::Semicolon)) {
 					return nullptr;
 				}
-				error(current(), "Expected function body or ';'");
+				error(std::source_location::current(), current(), "Expected function body or ';'");
 				return nullptr;
 			}
 
@@ -125,7 +126,7 @@ namespace dino::frontend {
 
 				if (check(TokenType::At)) {
 					if (attributes.function.uses_c_abi()) {
-						error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on functions and methods");
+						error(std::source_location::current(), current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on functions and methods");
 					}
 					auto include = parse_include_decl(access);
 					if (include) {
@@ -140,7 +141,7 @@ namespace dino::frontend {
 
 				if (match(TokenType::KwStruct)) {
 					if (attributes.function.uses_c_abi()) {
-						error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on functions and methods");
+						error(std::source_location::current(), current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on functions and methods");
 					}
 					auto decl = parse_struct_decl(access);
 					if (decl) {
@@ -167,11 +168,11 @@ namespace dino::frontend {
 
 				if (looks_like_var_decl_stmt()) {
 					if (check(TokenType::KwStatic)) {
-						error(current(), "Keyword 'static' is only allowed on struct members and local variables");
+						error(std::source_location::current(), current(), "Keyword 'static' is only allowed on struct members and local variables");
 						return nullptr;
 					}
 					if (!template_params.empty()) {
-						error(current(), "Template parameters are not allowed on global variables");
+						error(std::source_location::current(), current(), "Template parameters are not allowed on global variables");
 					}
 					auto decl = parse_global_var_decl(access, attributes.function);
 					if (attributes.has_req && !attributes.req_matches) {
@@ -181,7 +182,7 @@ namespace dino::frontend {
 					return decl;
 				}
 
-				error(current(), "Expected top-level declaration");
+				error(std::source_location::current(), current(), "Expected top-level declaration");
 				return nullptr;
 			}
 
@@ -260,10 +261,10 @@ namespace dino::frontend {
 
 					if (check(TokenType::Tilde)) {
 						if (member_static) {
-							error(current(), "Keyword 'static' is not allowed on destructors");
+							error(std::source_location::current(), current(), "Keyword 'static' is not allowed on destructors");
 						}
 						if (member_attributes.function.uses_c_abi()) {
-							error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+							error(std::source_location::current(), current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
 						}
 						if (auto destructor = parse_destructor_decl(member_access, decl->name); destructor) {
 							if (!member_attributes.has_req || member_attributes.req_matches) {
@@ -275,10 +276,10 @@ namespace dino::frontend {
 
 					if (check(TokenType::Identifier) && current().lexeme == decl->name && peek().type == TokenType::LParen) {
 						if (member_static) {
-							error(current(), "Keyword 'static' is not allowed on constructors");
+							error(std::source_location::current(), current(), "Keyword 'static' is not allowed on constructors");
 						}
 						if (member_attributes.function.uses_c_abi()) {
-							error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+							error(std::source_location::current(), current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
 						}
 						if (auto constructor = parse_constructor_decl(member_access, decl->name); constructor) {
 							if (!member_attributes.has_req || member_attributes.req_matches) {
@@ -292,10 +293,10 @@ namespace dino::frontend {
 						TypeRef type = parse_type_ref();
 						if (check(TokenType::LParen)) {
 							if (member_static) {
-								error(current(), "Keyword 'static' is not allowed on conversion operators");
+								error(std::source_location::current(), current(), "Keyword 'static' is not allowed on conversion operators");
 							}
 							if (member_attributes.function.uses_c_abi()) {
-								error(current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+								error(std::source_location::current(), current(), "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
 							}
 							ConversionDecl conv;
 							conv.location = current().location;
@@ -339,10 +340,10 @@ namespace dino::frontend {
 							}
 						} else {
 							if (!member_template_params.empty()) {
-								error(*id, "Template parameters are only allowed on methods");
+								error(std::source_location::current(), *id, "Template parameters are only allowed on methods");
 							}
 							if (member_attributes.function.uses_c_abi()) {
-								error(*id, "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
+								error(std::source_location::current(), *id, "Attributes '#[extern]' and '#[no_mangle]' are only allowed on methods");
 							}
 							FieldDecl f;
 							f.location = id->location;
@@ -359,7 +360,7 @@ namespace dino::frontend {
 							}
 							if (match(TokenType::Assign)) {
 								if (f.names.size() != 1) {
-									error(current(), "Field initializer is allowed only for a single field declaration");
+									error(std::source_location::current(), current(), "Field initializer is allowed only for a single field declaration");
 								}
 								f.init = parse_expression();
 							}
@@ -371,7 +372,7 @@ namespace dino::frontend {
 						continue;
 					}
 
-					error(current(), "Expected field, method, constructor or destructor");
+					error(std::source_location::current(), current(), "Expected field, method, constructor or destructor");
 					synchronize_struct();
 				}
 
@@ -400,7 +401,7 @@ namespace dino::frontend {
 				}
 				inject_nonull_param_checks(ctor.body, ctor.parameters);
 				if (ctor.name != name) {
-					error(*n, "Constructor name should be same with the structure name");
+					error(std::source_location::current(), *n, "Constructor name should be same with the structure name");
 				}
 				return ctor;
 			}
@@ -422,7 +423,7 @@ namespace dino::frontend {
 					return std::nullopt;
 				}
 				if (dtor.name != name) {
-					error(*n, "Destructor name should be same with the structure name");
+					error(std::source_location::current(), *n, "Destructor name should be same with the structure name");
 				}
 				return dtor;
 			}
@@ -456,7 +457,7 @@ namespace dino::frontend {
 				}
 
 				if (attributes.no_mangle) {
-					error(*name, "Attribute '#[no_mangle]' is only allowed on functions and methods");
+					error(std::source_location::current(), *name, "Attribute '#[no_mangle]' is only allowed on functions and methods");
 				}
 
 				auto decl = std::make_unique<GlobalVarDecl>();
@@ -466,13 +467,24 @@ namespace dino::frontend {
 				decl->type = std::move(type);
 				decl->name = name->lexeme;
 
+				bool brackets_used = false;
 				if (match(TokenType::LBracket)) {
 					expect(TokenType::RBracket, "Expected ']' after global array name");
 					decl->is_array = true;
+					brackets_used = true;
 				}
 
 				if (match(TokenType::Assign)) {
 					if (match(TokenType::LBrace)) {
+						// `T** x = { ... };` is sugar for `T* x[] = { ... };` — the
+						// underlying array element is one pointer level shallower than
+						// the declared variable type. We normalize that here so the
+						// rest of the pipeline sees a uniform `T_elem[]` shape.
+						if (!brackets_used && decl->type.pointer_depth > 0) {
+							--decl->type.pointer_depth;
+						}
+						decl->is_array = true;
+						decl->has_brace_init = true;
 						while (!check(TokenType::RBrace) && !check(TokenType::EndOfFile)) {
 							decl->array_init.push_back(parse_expression());
 							if (!match(TokenType::Comma)) {
@@ -531,14 +543,14 @@ namespace dino::frontend {
 				if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
 					type.name = advance().lexeme;
 				} else {
-					error(current(), "Expected type name");
+					error(std::source_location::current(), current(), "Expected type name");
 					type.name = "<error>";
 					return type;
 				}
 
 				while (true) {
 					if (match(TokenType::Star)) {
-						type.is_pointer = true;
+						type.pointer_depth++;
 						continue;
 					}
 					if (match(TokenType::And)) {
@@ -773,13 +785,24 @@ namespace dino::frontend {
 				st->name = name->lexeme;
 				st->is_static = is_static;
 
+				bool brackets_used = false;
 				if (match(TokenType::LBracket)) {
 					expect(TokenType::RBracket, "Expected '[' after array name");
 					st->is_array = true;
+					brackets_used = true;
 				}
 
 				if (match(TokenType::Assign)) {
 					if (match(TokenType::LBrace)) {
+						// `T** x = { ... };` is sugar for `T* x[] = { ... };` — the
+						// underlying array element is one pointer level shallower than
+						// the declared variable type. Normalize so the rest of the
+						// pipeline sees a uniform `T_elem[]` shape.
+						if (!brackets_used && st->type.pointer_depth > 0) {
+							--st->type.pointer_depth;
+						}
+						st->is_array = true;
+						st->has_brace_init = true;
 						while (!check(TokenType::RBrace) && !check(TokenType::EndOfFile)) {
 							st->array_init.push_back(parse_expression());
 							if (!match(TokenType::Comma)) {
@@ -877,7 +900,7 @@ namespace dino::frontend {
 				}
 
 				if (!(name->lexeme == "os" || name->lexeme == "arch" || name->lexeme == "build_type")) {
-					error(*name, "Unknown req variable '{}'", name->lexeme);
+					error(std::source_location::current(), *name, "Unknown req variable '{}'", name->lexeme);
 					return false;
 				}
 
@@ -886,7 +909,7 @@ namespace dino::frontend {
 				} else if (match(TokenType::NotEqual)) {
 					negate = true;
 				} else {
-					error(current(), "Expected '=' or '!=' in req comparison");
+					error(std::source_location::current(), current(), "Expected '=' or '!=' in req comparison");
 					return false;
 				}
 
@@ -897,20 +920,20 @@ namespace dino::frontend {
 
 				if (name->lexeme == "os") {
 					if (!(value->lexeme == "windows" || value->lexeme == "linux" || value->lexeme == "macos" || value->lexeme == "android")) {
-						error(*value, "Unknown req os value '{}'", value->lexeme);
+						error(std::source_location::current(), *value, "Unknown req os value '{}'", value->lexeme);
 						return false;
 					}
 					return negate ? value->lexeme != target_.os : value->lexeme == target_.os;
 				}
 				if (name->lexeme == "arch") {
 					if (!(value->lexeme == "x86" || value->lexeme == "x86_64" || value->lexeme == "arm" || value->lexeme == "arm64")) {
-						error(*value, "Unknown req arch value '{}'", value->lexeme);
+						error(std::source_location::current(), *value, "Unknown req arch value '{}'", value->lexeme);
 						return false;
 					}
 					return negate ? value->lexeme != target_.arch : value->lexeme == target_.arch;
 				}
 				if (!(value->lexeme == "debug" || value->lexeme == "release")) {
-					error(*value, "Unknown req build_type value '{}'", value->lexeme);
+					error(std::source_location::current(), *value, "Unknown req build_type value '{}'", value->lexeme);
 					return false;
 				}
 				return negate ? value->lexeme != target_.build_type : value->lexeme == target_.build_type;
@@ -937,7 +960,7 @@ namespace dino::frontend {
 			ExprPtr parse_ternary() {
 				auto cond = parse_logical_or();
 				if (match(TokenType::Question)) {
-					error(previous(), "Ternary operator is not supported; use 'if (cond) yield ... else yield ...' instead");
+					error(std::source_location::current(), previous(), "Ternary operator is not supported; use 'if (cond) yield ... else yield ...' instead");
 					auto then_e = parse_expression();
 					(void)then_e;
 					expect(TokenType::Colon, "Expected ':' in ternary expression");
@@ -1106,7 +1129,7 @@ namespace dino::frontend {
 					return expr;
 				}
 				if (match(TokenType::Number) || match(TokenType::String) || match(TokenType::Character) ||
-					match(TokenType::KwTrue) || match(TokenType::KwFalse)) {
+					match(TokenType::KwTrue) || match(TokenType::KwFalse) || match(TokenType::KwNullptr)) {
 					auto lit = std::make_unique<LiteralExpr>();
 					lit->location = previous().location;
 					lit->value = previous().lexeme;
@@ -1136,7 +1159,7 @@ namespace dino::frontend {
 					return expr;
 				}
 
-				error(current(), "Expected expression");
+				error(std::source_location::current(), current(), "Expected expression");
 				auto id = std::make_unique<IdentifierExpr>();
 				id->location = current().location;
 				id->name = "<error>";
@@ -1190,7 +1213,7 @@ namespace dino::frontend {
 					} else if (match(TokenType::KwDefault)) {
 						c.is_default = true;
 					} else {
-						error(current(), "Expected at least default case in match");
+						error(std::source_location::current(), current(), "Expected at least default case in match");
 						break;
 					}
 					expect(TokenType::Colon, "Expected ':' after match case");
@@ -1365,12 +1388,21 @@ namespace dino::frontend {
 				if (check(type)) {
 					return &advance();
 				}
-				error(current(), format, args...);
+				error(std::source_location::current(), current(), format, args...);
 				return nullptr;
 			}
 
-			void error(const Token& where, const std::string& format, auto&&... args) {
-				errors_.push_back(ParseMessage{where.location, std::vformat(format, std::make_format_args(args...))});
+			void error(const std::source_location& src_location, const Token& where, const std::string& format, auto&&... args) {
+				std::string final_format_msg;
+#ifndef NDEBUG
+				final_format_msg += "Src=";
+				final_format_msg += src_location.file_name();
+				final_format_msg += ":";
+				final_format_msg += src_location.line();
+				final_format_msg += ": ";
+#endif
+				final_format_msg += format;
+				errors_.push_back(ParseMessage{where.location, std::vformat(final_format_msg, std::make_format_args(args...))});
 			}
 
 		private:

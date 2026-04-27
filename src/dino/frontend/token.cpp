@@ -94,6 +94,7 @@ const char* to_string(TokenType type) {
     case TokenType::KwThis: return "KwThis";
     case TokenType::KwTrue: return "KwTrue";
     case TokenType::KwFalse: return "KwFalse";
+    case TokenType::KwNullptr: return "KwNullptr";
     }
     return "Unknown";
 }

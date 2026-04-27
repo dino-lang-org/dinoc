@@ -261,7 +261,7 @@ namespace dino::frontend {
 			out += "nonull ";
 		}
 		out += type.name;
-		if (type.is_pointer) {
+		for (int i = 0; i < type.pointer_depth; ++i) {
 			out += "*";
 		}
 		if (type.is_reference) {

@@ -45,13 +45,13 @@ namespace dino::codegen {
 			std::string name;
 			bool is_const = false;
 			bool is_nonull = false;
-			bool is_pointer = false;
+			int pointer_depth = 0;
 			bool is_reference = false;
 			bool is_array = false;
 			size_t array_size = 0;
 			bool is_error = false;
 
-			[[nodiscard]] bool is_void() const { return !is_error && !is_pointer && !is_reference && !is_array && name == "void"; }
+			[[nodiscard]] bool is_void() const { return !is_error && pointer_depth == 0 && !is_reference && !is_array && name == "void"; }
 		};
 
 		struct FieldInfo {
@@ -152,7 +152,7 @@ namespace dino::codegen {
 			result.name = type.name;
 			result.is_const = type.is_const;
 			result.is_nonull = type.is_nonull;
-			result.is_pointer = type.is_pointer;
+			result.pointer_depth = type.pointer_depth;
 			result.is_reference = type.is_reference;
 			return result;
 		}
@@ -176,7 +176,7 @@ namespace dino::codegen {
 				out += "nonull ";
 			}
 			out += type.name;
-			if (type.is_pointer) {
+			for (int i = 0; i < type.pointer_depth; ++i) {
 				out += "*";
 			}
 			if (type.is_reference) {
@@ -197,7 +197,7 @@ namespace dino::codegen {
 		}
 
 		bool is_integer_type(const SemanticType& type) {
-			if (type.is_error || type.is_pointer || type.is_reference || type.is_array) {
+			if (type.is_error || type.pointer_depth > 0 || type.is_reference || type.is_array) {
 				return false;
 			}
 			return type.name == "int8" || type.name == "int16" || type.name == "int32" || type.name == "int64" ||
@@ -210,7 +210,7 @@ namespace dino::codegen {
 		}
 
 		bool is_float_type(const SemanticType& type) {
-			return !type.is_error && !type.is_pointer && !type.is_reference && !type.is_array &&
+			return !type.is_error && type.pointer_depth == 0 && !type.is_reference && !type.is_array &&
 				   (type.name == "float" || type.name == "double");
 		}
 
@@ -219,7 +219,7 @@ namespace dino::codegen {
 		}
 
 		bool is_bool_like(const SemanticType& type) {
-			return type.name == "bool" || is_numeric_type(type) || type.is_pointer;
+			return type.name == "bool" || is_numeric_type(type) || type.pointer_depth > 0;
 		}
 
 		char decode_escape_char(char escaped) {
@@ -265,12 +265,12 @@ namespace dino::codegen {
 		}
 
 		bool same_type(const SemanticType& lhs, const SemanticType& rhs) {
-			return lhs.name == rhs.name && lhs.is_pointer == rhs.is_pointer && lhs.is_reference == rhs.is_reference &&
+			return lhs.name == rhs.name && lhs.pointer_depth == rhs.pointer_depth && lhs.is_reference == rhs.is_reference &&
 				   lhs.is_array == rhs.is_array && lhs.array_size == rhs.array_size;
 		}
 
 		bool matches_template_wrapper_shape(const SemanticType& pattern, const SemanticType& actual) {
-			if (pattern.is_pointer && !actual.is_pointer) {
+			if (pattern.pointer_depth > 0 && actual.pointer_depth == 0) {
 				return false;
 			}
 			if (pattern.is_reference && !actual.is_reference) {
@@ -302,7 +302,7 @@ namespace dino::codegen {
 			if (is_numeric_type(from) && is_numeric_type(to)) {
 				return true;
 			}
-			if (from.is_array && to.is_pointer && from.name == to.name) {
+			if (from.is_array && to.pointer_depth > 0 && from.name == to.name) {
 				return true;
 			}
 			return false;
@@ -534,7 +534,7 @@ namespace dino::codegen {
 			}
 
 			bool type_has_destructor(const SemanticType& type) const {
-				if (type.is_pointer || type.is_reference || type.is_array) {
+				if (type.pointer_depth > 0 || type.is_reference || type.is_array) {
 					return false;
 				}
 				const auto found = structs_.find(type.name);
@@ -542,7 +542,7 @@ namespace dino::codegen {
 			}
 
 			bool type_needs_static_cleanup(const SemanticType& type) const {
-				if (type.is_pointer || type.is_reference) {
+				if (type.pointer_depth > 0 || type.is_reference) {
 					return false;
 				}
 				if (type.is_array) {
@@ -857,7 +857,7 @@ namespace dino::codegen {
 				std::vector<SemanticType> mangled_params;
 				if (!function.is_static_method) {
 					SemanticType self_type{function.owner};
-					self_type.is_pointer = true;
+					self_type.pointer_depth = 1;
 					mangled_params.push_back(self_type);
 				}
 				mangled_params.insert(mangled_params.end(), function.params.begin(), function.params.end());
@@ -877,14 +877,17 @@ namespace dino::codegen {
 			}
 
 			llvm::Type* llvm_type(const SemanticType& type, bool decay_array = false) {
-				if (type.is_reference || type.is_pointer) {
-					return llvm::PointerType::get(context_, 0);
-				}
+				// Array types must be checked first: an array of pointers (e.g.
+				// `const char* x[]`) has both pointer_depth > 0 *and* is_array,
+				// but its underlying LLVM type is `[N x ptr]`, not `ptr`.
 				if (type.is_array) {
 					if (decay_array) {
 						return llvm::PointerType::get(context_, 0);
 					}
 					return llvm::ArrayType::get(llvm_type(element_type(type)), type.array_size);
+				}
+				if (type.is_reference || type.pointer_depth > 0) {
+					return llvm::PointerType::get(context_, 0);
 				}
 				if (type.name == "void") {
 					return llvm::Type::getVoidTy(context_);
@@ -919,9 +922,18 @@ namespace dino::codegen {
 
 			SemanticType element_type(const SemanticType& type) const {
 				SemanticType result = type;
-				result.is_array = false;
-				result.array_size = 0;
-				result.is_pointer = false;
+				if (type.is_array) {
+					// Stripping the array dimension preserves the underlying element
+					// type — including any pointer depth (e.g. element of `[N x T*]`
+					// is `T*`, not `T`).
+					result.is_array = false;
+					result.array_size = 0;
+					return result;
+				}
+				// Pointer/reference dereference: peel off one level.
+				if (result.pointer_depth > 0) {
+					--result.pointer_depth;
+				}
 				result.is_reference = false;
 				return result;
 			}
@@ -932,7 +944,7 @@ namespace dino::codegen {
 					SemanticType substituted = found->second;
 					substituted.is_const = substituted.is_const || result.is_const;
 					substituted.is_nonull = substituted.is_nonull || result.is_nonull;
-					substituted.is_pointer = substituted.is_pointer || result.is_pointer;
+					substituted.pointer_depth = std::max(substituted.pointer_depth, result.pointer_depth);
 					substituted.is_reference = substituted.is_reference || result.is_reference;
 					substituted.is_array = substituted.is_array || result.is_array;
 					if (result.is_array && result.array_size != 0) {
@@ -952,8 +964,8 @@ namespace dino::codegen {
 						return false;
 					}
 					SemanticType deduced = actual;
-					if (pattern.is_pointer) {
-						deduced.is_pointer = false;
+					if (pattern.pointer_depth > 0) {
+						deduced.pointer_depth = std::max(0, deduced.pointer_depth - pattern.pointer_depth);
 					}
 					if (pattern.is_reference) {
 						deduced.is_reference = false;
@@ -977,7 +989,7 @@ namespace dino::codegen {
 					SemanticType substituted = found->second;
 					substituted.is_const = substituted.is_const || type.is_const;
 					substituted.is_nonull = substituted.is_nonull || type.is_nonull;
-					substituted.is_pointer = substituted.is_pointer || type.is_pointer;
+					substituted.pointer_depth = std::max(substituted.pointer_depth, type.pointer_depth);
 					substituted.is_reference = substituted.is_reference || type.is_reference;
 					substituted.is_array = substituted.is_array || type.is_array;
 					if (type.is_array && type.array_size != 0) {
@@ -1122,7 +1134,7 @@ namespace dino::codegen {
 				if (type.is_void()) {
 					return nullptr;
 				}
-				if (type.is_pointer || type.is_reference || type.is_array) {
+				if (type.pointer_depth > 0 || type.is_reference || type.is_array) {
 					return llvm::ConstantPointerNull::get(llvm::PointerType::get(context_, 0));
 				}
 				if (type.name == "float") {
@@ -1277,7 +1289,7 @@ namespace dino::codegen {
 						return llvm::ConstantInt::get(llvm_type(to), converted);
 					}
 				}
-				if (from.is_array && to.is_pointer && from.name == to.name) {
+				if (from.is_array && to.pointer_depth > 0 && from.name == to.name) {
 					return value;
 				}
 				return nullptr;
@@ -1424,7 +1436,7 @@ namespace dino::codegen {
 						if (!global.decl->array_init.empty()) {
 							std::vector<llvm::Constant*> elements;
 							elements.reserve(global.decl->array_init.size());
-							SemanticType element = element_type(global.type);
+							SemanticType elem_type = element_type(global.type);
 							bool all_constant = true;
 							for (const auto& expr: global.decl->array_init) {
 								llvm::Constant* value = emit_constant_expression(expr.get());
@@ -1433,7 +1445,7 @@ namespace dino::codegen {
 									all_constant = false;
 									break;
 								}
-								value = cast_constant(value, infer_expr_type(expr.get()), element);
+								value = cast_constant(value, infer_expr_type(expr.get()), elem_type);
 								if (value == nullptr) {
 									errors_.push_back(std::format("Global array '{}' requires constant initializer expressions", name));
 									all_constant = false;
@@ -1770,7 +1782,7 @@ namespace dino::codegen {
 					if (literal->literal_kind == "String") {
 						SemanticType type;
 						type.name = "char";
-						type.is_pointer = true;
+						type.pointer_depth = 1;
 						type.is_const = true;
 						return type;
 					}
@@ -1788,7 +1800,7 @@ namespace dino::codegen {
 				if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(expr)) {
 					if (identifier->name == "this" && current_struct_ != nullptr && current_self_ != nullptr) {
 						SemanticType self_type{current_struct_->decl->name};
-						self_type.is_pointer = true;
+						self_type.pointer_depth = 1;
 						return self_type;
 					}
 					if (const VariableInfo* variable = lookup_variable(identifier->name)) {
@@ -1821,11 +1833,11 @@ namespace dino::codegen {
 				}
 				if (const auto* unary = dynamic_cast<const UnaryExpr*>(expr)) {
 					SemanticType operand = infer_expr_type(unary->operand.get());
-					if (unary->op == "*" && (operand.is_pointer || operand.is_array || operand.is_reference)) {
+					if (unary->op == "*" && (operand.pointer_depth > 0 || operand.is_array || operand.is_reference)) {
 						return element_type(operand);
 					}
 					if (unary->op == "&") {
-						operand.is_pointer = true;
+						operand.pointer_depth++;
 						operand.is_array = false;
 						return operand;
 					}
@@ -1875,7 +1887,7 @@ namespace dino::codegen {
 					}
 					SemanticType object_type = infer_expr_type(member->object.get());
 					if (member->via_arrow) {
-						object_type.is_pointer = false;
+						object_type.pointer_depth = 0;
 						object_type.is_reference = false;
 					}
 					object_type.is_array = false;
@@ -1899,7 +1911,7 @@ namespace dino::codegen {
 				}
 				if (const auto* alloc = dynamic_cast<const NewExpr*>(expr)) {
 					SemanticType type = from_typeref(alloc->target_type);
-					type.is_pointer = true;
+					type.pointer_depth = 1;
 					return type;
 				}
 				if (dynamic_cast<const DestructorCallExpr*>(expr)) {
@@ -2045,7 +2057,7 @@ namespace dino::codegen {
 					llvm::Value* base_address = nullptr;
 					if (member->via_arrow) {
 						base_address = emit_expression(member->object.get());
-						object_type.is_pointer = false;
+						object_type.pointer_depth = 0;
 						object_type.is_reference = false;
 					} else {
 						base_address = emit_lvalue(member->object.get());
@@ -2517,7 +2529,7 @@ namespace dino::codegen {
 
 				if (expr.via_arrow) {
 					address = emit_expression(expr.object.get());
-					base_type.is_pointer = false;
+					base_type.pointer_depth = 0;
 					base_type.is_reference = false;
 				} else {
 					address = ensure_address(expr.object.get(), object_type);
@@ -2676,7 +2688,7 @@ namespace dino::codegen {
 						return builder_.CreateTrunc(value, llvm_type(to), "int.trunc");
 					}
 				}
-				if (!implicit && !from.is_pointer && !from.is_reference && !from.is_array) {
+				if (!implicit && !from.pointer_depth > 0 && !from.is_reference && !from.is_array) {
 					if (const auto struct_it = structs_.find(from.name); struct_it != structs_.end()) {
 						if (const auto conversion = struct_it->second.conversions.find(to.name); conversion != struct_it->second.conversions.end()) {
 							llvm::Value* address = materialize_address(value, from, "cast.tmp");
@@ -2684,7 +2696,7 @@ namespace dino::codegen {
 						}
 					}
 				}
-				if (from.is_array && to.is_pointer && from.name == to.name) {
+				if (from.is_array && to.pointer_depth > 0 && from.name == to.name) {
 					return value;
 				}
 				errors_.push_back(std::format("Cannot {} cast from {} to {}",
@@ -2699,7 +2711,7 @@ namespace dino::codegen {
 					return value;
 				}
 
-				if (type.is_pointer || type.is_reference || type.is_array || type.is_error) {
+				if (type.pointer_depth > 0 || type.is_reference || type.is_array || type.is_error) {
 					return value;
 				}
 
@@ -2730,7 +2742,7 @@ namespace dino::codegen {
 				if (value == nullptr) {
 					return nullptr;
 				}
-				if (type.is_pointer || type.is_reference) {
+				if (type.pointer_depth > 0 || type.is_reference) {
 					return value;
 				}
 				llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(type), name);
@@ -2739,7 +2751,7 @@ namespace dino::codegen {
 			}
 
 			llvm::Value* as_boolean(llvm::Value* value, const SemanticType& type) {
-				if (type.name == "bool" && !type.is_pointer && !type.is_reference && !type.is_array) {
+				if (type.name == "bool" && type.pointer_depth == 0 && !type.is_reference && !type.is_array) {
 					return value;
 				}
 				if (is_float_type(type)) {
@@ -2748,7 +2760,7 @@ namespace dino::codegen {
 				if (is_integer_type(type)) {
 					return builder_.CreateICmpNE(value, llvm::ConstantInt::get(llvm_type(type), 0), "bool.cast");
 				}
-				if (type.is_pointer || type.is_reference) {
+				if (type.pointer_depth > 0 || type.is_reference) {
 					return builder_.CreateICmpNE(value,
 												 llvm::ConstantPointerNull::get(llvm::PointerType::get(context_, 0)),
 												 "bool.cast");
@@ -2888,7 +2900,7 @@ namespace dino::codegen {
 
 					SemanticType object_type = infer_expr_type(member->object.get());
 					if (member->via_arrow) {
-						object_type.is_pointer = false;
+						object_type.pointer_depth = 0;
 						object_type.is_reference = false;
 					}
 					if (const auto struct_it = structs_.find(object_type.name); struct_it != structs_.end()) {
@@ -3063,12 +3075,13 @@ namespace dino::codegen {
 			void emit_var_decl(const VarDeclStmt& variable) {
 				SemanticType type = from_typeref(variable.type);
 				if (variable.is_static) {
+					SemanticType static_type = type;
 					if (variable.is_array) {
-						type.is_array = true;
-						type.array_size = variable.array_init.size();
+						static_type.is_array = true;
+						static_type.array_size = variable.array_init.size();
 					}
-					StaticLocalInfo& info = ensure_static_local(variable, type);
-					declare_variable(variable.name, VariableInfo{type, info.storage, false}, false);
+					StaticLocalInfo& info = ensure_static_local(variable, static_type);
+					declare_variable(variable.name, VariableInfo{static_type, info.storage, false}, false);
 					if (variable.init == nullptr && variable.array_init.empty()) {
 						return;
 					}
@@ -3081,11 +3094,12 @@ namespace dino::codegen {
 
 					builder_.SetInsertPoint(init_block);
 					if (variable.is_array) {
+						SemanticType elem_type = element_type(static_type);
 						for (size_t i = 0; i < variable.array_init.size(); ++i) {
 							llvm::Value* init_value = emit_expression(variable.array_init[i].get());
 							SemanticType init_type = infer_expr_type(variable.array_init[i].get());
-							init_value = cast_value(init_value, init_type, element_type(type), true);
-							llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(type),
+							init_value = cast_value(init_value, init_type, elem_type, true);
+							llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(static_type),
 																					  info.storage,
 																					  {builder_.getInt32(0), builder_.getInt32(static_cast<int>(i))},
 																					  variable.name + ".static.elem");
@@ -3106,15 +3120,17 @@ namespace dino::codegen {
 				}
 
 				if (variable.is_array) {
-					type.is_array = true;
-					type.array_size = variable.array_init.size();
-					llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(type), variable.name);
-					declare_variable(variable.name, VariableInfo{type, slot, false});
+					SemanticType array_type = type;
+					array_type.is_array = true;
+					array_type.array_size = variable.array_init.size();
+					llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(array_type), variable.name);
+					declare_variable(variable.name, VariableInfo{array_type, slot, false});
+					SemanticType elem_type = element_type(array_type);
 					for (size_t i = 0; i < variable.array_init.size(); ++i) {
 						llvm::Value* init_value = emit_expression(variable.array_init[i].get());
 						SemanticType init_type = infer_expr_type(variable.array_init[i].get());
-						init_value = cast_value(init_value, init_type, element_type(type), true);
-						llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(type),
+						init_value = cast_value(init_value, init_type, elem_type, true);
+						llvm::Value* element_address = builder_.CreateInBoundsGEP(llvm_type(array_type),
 																				  slot,
 																				  {builder_.getInt32(0), builder_.getInt32(static_cast<int>(i))},
 																				  variable.name + ".elem");
@@ -3171,12 +3187,12 @@ namespace dino::codegen {
 			void emit_delete(const DeleteStmt& delete_stmt) {
 				llvm::Value* pointer = emit_expression(delete_stmt.value.get());
 				SemanticType type = infer_expr_type(delete_stmt.value.get());
-				if (pointer == nullptr || !type.is_pointer) {
+				if (pointer == nullptr || type.pointer_depth == 0) {
 					errors_.push_back("delete requires a pointer expression");
 					return;
 				}
 				SemanticType pointee = type;
-				pointee.is_pointer = false;
+				pointee.pointer_depth = std::max(0, pointee.pointer_depth - 1);
 				pointee.is_reference = false;
 				llvm::Value* element_count = heap_count_from_payload(pointer);
 

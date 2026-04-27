@@ -112,6 +112,7 @@ enum class TokenType {
     KwThis,
     KwTrue,
     KwFalse,
+    KwNullptr,
 };
 
 struct SourceLocation {

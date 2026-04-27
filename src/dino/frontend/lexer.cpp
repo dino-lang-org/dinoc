@@ -281,6 +281,7 @@ TokenType Lexer::identifier_keyword(const std::string& text) const {
         {"this", TokenType::KwThis},
         {"true", TokenType::KwTrue},
         {"false", TokenType::KwFalse},
+        {"nullptr", TokenType::KwNullptr},
     };
 
     const auto it = kKeywords.find(text);

@@ -49,7 +49,7 @@ namespace dino::frontend {
 		std::string name;
 		bool is_const = false;
 		bool is_nonull = false;
-		bool is_pointer = false;
+		int pointer_depth = 0;
 		bool is_reference = false;
 		bool variadic = false;
 	};
@@ -185,6 +185,10 @@ namespace dino::frontend {
 		std::string name;
 		bool is_static = false;
 		bool is_array = false;
+		// True when the user wrote `= { ... }` (possibly empty), so the variable
+		// has an initializer even if `array_init` is empty. Lets the semantic
+		// checker accept `const T x[] = { };` while still rejecting `const T x[];`.
+		bool has_brace_init = false;
 		ExprPtr init;
 		std::vector<ExprPtr> array_init;
 		bool needs_nonull_check = false;
@@ -240,6 +244,8 @@ namespace dino::frontend {
 		TypeRef type;
 		std::string name;
 		bool is_array = false;
+		// True when the user wrote `= { ... }` (possibly empty); see VarDeclStmt.
+		bool has_brace_init = false;
 		ExprPtr init;
 		std::vector<ExprPtr> array_init;
 		[[nodiscard]] std::string kind() const override { return "GlobalVarDecl"; }
