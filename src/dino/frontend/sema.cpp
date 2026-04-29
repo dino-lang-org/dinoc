@@ -276,6 +276,35 @@ namespace dino::frontend {
 				std::unordered_map<std::string, SemanticType> vars;
 			};
 
+			[[nodiscard]] static std::string template_base_name(const std::string& name) {
+				const size_t lt_pos = name.find('<');
+				const size_t gt_pos = name.rfind('>');
+				if (lt_pos != std::string::npos && gt_pos != std::string::npos && gt_pos > lt_pos) {
+					return name.substr(0, lt_pos);
+				}
+				return name;
+			}
+
+			[[nodiscard]] const StructInfo* find_struct_info(const std::string& name) const {
+				if (const auto it = structs_.find(name); it != structs_.end()) {
+					return &it->second;
+				}
+				if (const auto it = template_structs_.find(name); it != template_structs_.end()) {
+					return &it->second;
+				}
+				const std::string base_name = template_base_name(name);
+				if (base_name == name) {
+					return nullptr;
+				}
+				if (const auto it = structs_.find(base_name); it != structs_.end()) {
+					return &it->second;
+				}
+				if (const auto it = template_structs_.find(base_name); it != template_structs_.end()) {
+					return &it->second;
+				}
+				return nullptr;
+			}
+
 			void push_scope() { scopes_.emplace_back(); }
 			void pop_scope() {
 				if (!scopes_.empty()) {
@@ -321,7 +350,14 @@ namespace dino::frontend {
 				if (current_unit_ == nullptr) {
 					return true;
 				}
-				return current_unit_->local_symbols.contains(name);
+				if (current_unit_->local_symbols.contains(name)) {
+					return true;
+				}
+				// Also check if it's a struct or template struct
+				if (structs_.contains(name) || template_structs_.contains(name)) {
+					return true;
+				}
+				return find_struct_info(name) != nullptr;
 			}
 
 			[[nodiscard]] bool is_known_type(const SemanticType& t) const {
@@ -331,7 +367,10 @@ namespace dino::frontend {
 				if (active_template_types_.contains(t.name)) {
 					return true;
 				}
-				return is_builtin_type_name(t.name) || structs_.contains(t.name);
+				if (is_builtin_type_name(t.name) || structs_.contains(t.name) || template_structs_.contains(t.name)) {
+					return true;
+				}
+				return find_struct_info(t.name) != nullptr;
 			}
 
 			void build_globals() {
@@ -397,7 +436,12 @@ namespace dino::frontend {
 								sig.location = c.location;
 								info.conversions.push_back(std::move(sig));
 							}
-							structs_[st->name] = std::move(info);
+							// Store template structs separately
+							if (!st->template_params.empty()) {
+								template_structs_[st->name] = std::move(info);
+							} else {
+								structs_[st->name] = std::move(info);
+							}
 						} else if (const auto* fn = dynamic_cast<const FunctionDecl*>(decl.get())) {
 							FunctionSig sig;
 							sig.name = fn->name;
@@ -448,6 +492,10 @@ namespace dino::frontend {
 			}
 
 			void check_struct(const StructDecl& st) {
+				// Skip type checking for template structs - they will be checked when instantiated
+				if (!st.template_params.empty()) {
+					return;
+				}
 				current_struct_ = st.name;
 				active_template_types_.clear();
 				for (const auto& tp: st.template_params) {
@@ -690,10 +738,14 @@ namespace dino::frontend {
 				if (lookup_var(identifier->name).has_value()) {
 					return std::nullopt;
 				}
-				if (!is_visible_symbol(identifier->name) || !structs_.contains(identifier->name)) {
+				if (!is_visible_symbol(identifier->name)) {
 					return std::nullopt;
 				}
-				return identifier->name;
+				const StructInfo* info = find_struct_info(identifier->name);
+				if (info == nullptr) {
+					return std::nullopt;
+				}
+				return info->name;
 			}
 
 			[[nodiscard]] const FunctionSig* choose_method_overload(const std::vector<SemanticType>& args,
@@ -1312,13 +1364,17 @@ namespace dino::frontend {
 							error(std::source_location::current(), e->location, "Access operator '->' cannot be used with a type name");
 							return SemanticType::error();
 						}
-						const auto it = structs_.find(*static_owner);
-						const auto field = it->second.static_fields.find(e->member);
-						if (field != it->second.static_fields.end()) {
+						const StructInfo* struct_info = find_struct_info(*static_owner);
+						if (struct_info == nullptr) {
+							error(std::source_location::current(), e->location, "<?> Not found structure with name '{}'", *static_owner);
+							return SemanticType::error();
+						}
+						const auto field = struct_info->static_fields.find(e->member);
+						if (field != struct_info->static_fields.end()) {
 							return field->second.type;
 						}
-						const auto method = it->second.methods.find(e->member);
-						if (method != it->second.methods.end()) {
+						const auto method = struct_info->methods.find(e->member);
+						if (method != struct_info->methods.end()) {
 							for (const auto& overload: method->second) {
 								if (overload.is_static) {
 									warning(e->location, "Maybe you want to call it?");
@@ -1348,30 +1404,30 @@ namespace dino::frontend {
 						base.is_array = false;
 					}
 
-					const auto it = structs_.find(base.name);
-					if (it == structs_.end()) {
+						const StructInfo* struct_info = find_struct_info(base.name);
+						if (struct_info == nullptr) {
 						error(std::source_location::current(), e->location, "<?> Not found structure with name '{}'", base.name);
 						return SemanticType::error();
 					}
 
-					const auto field = it->second.fields.find(e->member);
-					if (field != it->second.fields.end()) {
+						const auto field = struct_info->fields.find(e->member);
+						if (field != struct_info->fields.end()) {
 						return field->second.type;
 					}
 
-					const auto method = it->second.methods.find(e->member);
-					if (method != it->second.methods.end() && !method->second.empty()) {
+						const auto method = struct_info->methods.find(e->member);
+						if (method != struct_info->methods.end() && !method->second.empty()) {
 						for (const auto& overload: method->second) {
 							if (!overload.is_static) {
 								warning(e->location, "Maybe you want to call it?");
 								return overload.return_type;
 							}
 						}
-						error(std::source_location::current(), e->location, "Method '{}.{}' is static and should be called through the type", it->second.name, e->member);
+						error(std::source_location::current(), e->location, "Method '{}.{}' is static and should be called through the type", struct_info->name, e->member);
 						return SemanticType::error();
 					}
 
-					error(std::source_location::current(), e->location, "In structure: '{}': unknown member with name '{}'", it->second.name, e->member);
+					error(std::source_location::current(), e->location, "In structure: '{}': unknown member with name '{}'", struct_info->name, e->member);
 					return SemanticType::error();
 				}
 
@@ -1486,12 +1542,12 @@ namespace dino::frontend {
 						return SemanticType::error();
 					}
 
-					const auto it = structs_.find(base.name);
-					if (it == structs_.end()) {
+					const StructInfo* struct_info = find_struct_info(base.name);
+					if (struct_info == nullptr) {
 						error(std::source_location::current(), e->location, "Explicit destructor call requires a structure type");
 						return SemanticType::error();
 					}
-					if (!it->second.has_destructor) {
+					if (!struct_info->has_destructor) {
 						error(std::source_location::current(), e->location, "Structure '{}' does not have a destructor", base.name);
 						return SemanticType::error();
 					}
@@ -1518,14 +1574,15 @@ namespace dino::frontend {
 							error(std::source_location::current(), e->location, "Not found compatible overload for function with name '{}'", callee_id->name);
 							return SemanticType::error();
 						}
-						if (structs_.contains(callee_id->name) && is_visible_symbol(callee_id->name)) {
-							const auto& ctors = structs_[callee_id->name].constructors;
+						// Check if this is a template instantiation like Array<int32>
+						if (const StructInfo* struct_info = find_struct_info(callee_id->name); struct_info != nullptr && is_visible_symbol(callee_id->name)) {
+							const auto& ctors = struct_info->constructors;
 							if (!ctors.empty() && choose_overload(args, ctors) == nullptr) {
 								error(std::source_location::current(), e->location, "Not found compatible constructor for structure '{}'" + callee_id->name);
 								return SemanticType::error();
 							}
 							SemanticType t;
-							t.name = callee_id->name;
+							t.name = callee_id->name; // Return the full instantiation name
 							return t;
 						}
 						error(std::source_location::current(), e->location, "Call to undefined function/constructor: {}", callee_id->name);
@@ -1561,9 +1618,13 @@ namespace dino::frontend {
 								error(std::source_location::current(), member->location, "Operator '->' cannot be used with a type name");
 								return SemanticType::error();
 							}
-							const auto it = structs_.find(*static_owner);
-							const auto mit = it->second.methods.find(member->member);
-							if (mit == it->second.methods.end()) {
+							const StructInfo* struct_info = find_struct_info(*static_owner);
+							if (struct_info == nullptr) {
+								error(std::source_location::current(), member->location, "Not found structure with name '{}'", *static_owner);
+								return SemanticType::error();
+							}
+							const auto mit = struct_info->methods.find(member->member);
+							if (mit == struct_info->methods.end()) {
 								error(std::source_location::current(), member->location, "Not found static method with name '{}' in structure '{}'", member->member, *static_owner);
 								return SemanticType::error();
 							}
@@ -1598,14 +1659,14 @@ namespace dino::frontend {
 							base.is_array = false;
 						}
 
-						const auto it = structs_.find(base.name);
-						if (it == structs_.end()) {
+						const StructInfo* struct_info = find_struct_info(base.name);
+						if (struct_info == nullptr) {
 							error(std::source_location::current(), member->location, "Method calling available only for structures");
 							return SemanticType::error();
 						}
-						const auto mit = it->second.methods.find(member->member);
-						if (mit == it->second.methods.end()) {
-							error(std::source_location::current(), member->location, "Not found methods with name '{}' in structure with name '{}'", member->member, it->second.name);
+						const auto mit = struct_info->methods.find(member->member);
+						if (mit == struct_info->methods.end()) {
+							error(std::source_location::current(), member->location, "Not found methods with name '{}' in structure with name '{}'", member->member, struct_info->name);
 							return SemanticType::error();
 						}
 						if (const FunctionSig* sig = choose_method_overload(args, mit->second, false)) {
@@ -1712,6 +1773,7 @@ namespace dino::frontend {
 			bool current_method_is_static_ = false;
 
 			std::unordered_map<std::string, StructInfo> structs_;
+			std::unordered_map<std::string, StructInfo> template_structs_;
 			std::unordered_map<std::string, std::vector<FunctionSig>> functions_;
 			std::unordered_map<std::string, GlobalVarInfo> globals_;
 		};
