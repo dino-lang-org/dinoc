@@ -59,6 +59,9 @@ const char* to_string(TokenType type) {
     case TokenType::Arrow: return "Arrow";
     case TokenType::Ellipsis: return "Ellipsis";
     case TokenType::KwInclude: return "KwInclude";
+    case TokenType::KwSizeof: return "KwSizeof";
+    case TokenType::KwTypeof: return "KwTypeof";
+    case TokenType::KwDecay: return "KwDecay";
     case TokenType::KwPublic: return "KwPublic";
     case TokenType::KwPrivate: return "KwPrivate";
     case TokenType::KwInt8: return "KwInt8";

@@ -246,6 +246,9 @@ Token Lexer::scan_operator_or_punct(size_t start, size_t start_line, size_t star
 TokenType Lexer::identifier_keyword(const std::string& text) const {
     static const std::unordered_map<std::string, TokenType> kKeywords = {
         {"include", TokenType::KwInclude},
+        {"sizeof", TokenType::KwSizeof},
+        {"typeof", TokenType::KwTypeof},
+        {"decay", TokenType::KwDecay},
         {"public", TokenType::KwPublic},
         {"private", TokenType::KwPrivate},
         {"int8", TokenType::KwInt8},

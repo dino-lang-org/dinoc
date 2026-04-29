@@ -47,10 +47,12 @@ namespace dino::frontend {
 
 	struct TypeRef {
 		std::string name;
+		std::optional<std::string> typeof_name;
 		bool is_const = false;
 		bool is_nonull = false;
 		int pointer_depth = 0;
 		bool is_reference = false;
+		bool decay = false;
 		bool variadic = false;
 	};
 
@@ -115,6 +117,11 @@ namespace dino::frontend {
 		TypeRef target_type;
 		ExprPtr value;
 		[[nodiscard]] std::string kind() const override { return "TypeCastExpr"; }
+	};
+
+	struct SizeofExpr : Expr {
+		TypeRef target_type;
+		[[nodiscard]] std::string kind() const override { return "SizeofExpr"; }
 	};
 
 	struct NewExpr : Expr {

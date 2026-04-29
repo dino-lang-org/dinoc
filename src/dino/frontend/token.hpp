@@ -75,6 +75,9 @@ enum class TokenType {
     Ellipsis,
 
     KwInclude,
+    KwSizeof,
+    KwTypeof,
+    KwDecay,
     KwPublic,
     KwPrivate,
 

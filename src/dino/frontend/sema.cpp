@@ -332,6 +332,43 @@ namespace dino::frontend {
 				return std::nullopt;
 			}
 
+			[[nodiscard]] SemanticType apply_decay(SemanticType type) const {
+				type.is_const = false;
+				type.is_nonull = false;
+				type.is_reference = false;
+				type.pointer_depth = 0;
+				type.is_array = false;
+				return type;
+			}
+
+			[[nodiscard]] SemanticType resolve_typeref(const TypeRef& ref) const {
+				SemanticType t;
+				if (ref.typeof_name.has_value()) {
+					const auto found = lookup_var(*ref.typeof_name);
+					if (!found.has_value()) {
+						SemanticType unresolved;
+						unresolved.name = "<unresolved-typeof>";
+						return unresolved;
+					}
+					t = *found;
+					if (t.is_array) {
+						t.is_array = false;
+						t.pointer_depth = std::max(1, t.pointer_depth);
+					}
+				} else {
+					t = from_typeref(ref);
+				}
+
+				if (ref.decay) {
+					t = apply_decay(t);
+				}
+				t.is_const = t.is_const || ref.is_const;
+				t.is_nonull = t.is_nonull || ref.is_nonull;
+				t.pointer_depth += ref.pointer_depth;
+				t.is_reference = t.is_reference || ref.is_reference;
+				return t;
+			}
+
 			void error(const std::source_location& src_location, const SourceLocation& loc, const std::string& format, auto&&... args) {
 				std::string final_format_msg;
 #ifndef NDEBUG
@@ -382,7 +419,7 @@ namespace dino::frontend {
 							info.has_destructor = !st->destructors.empty();
 							info.location = st->location;
 							for (const auto& f: st->fields) {
-								SemanticType field_type = from_typeref(f.type);
+								SemanticType field_type = resolve_typeref(f.type);
 								for (const auto& field_name: f.names) {
 									FieldInfo field_info{field_type, f.access, f.is_static};
 									if (f.is_static) {
@@ -395,12 +432,12 @@ namespace dino::frontend {
 							for (const auto& m: st->methods) {
 								FunctionSig sig;
 								sig.name = m.name;
-								sig.return_type = from_typeref(m.return_type);
+								sig.return_type = resolve_typeref(m.return_type);
 								sig.access = m.access;
 								sig.location = m.location;
 								sig.template_params = m.template_params;
 								for (const auto& p: m.parameters) {
-									SemanticType pt = from_typeref(p.type);
+									SemanticType pt = resolve_typeref(p.type);
 									if (p.type.variadic) {
 										sig.variadic = true;
 									}
@@ -419,7 +456,7 @@ namespace dino::frontend {
 								sig.access = c.access;
 								sig.location = c.location;
 								for (const auto& p: c.parameters) {
-									SemanticType pt = from_typeref(p.type);
+									SemanticType pt = resolve_typeref(p.type);
 									if (p.type.variadic) {
 										sig.variadic = true;
 									}
@@ -431,7 +468,7 @@ namespace dino::frontend {
 							for (const auto& c: st->conversions) {
 								FunctionSig sig;
 								sig.name = "<conversion>";
-								sig.return_type = from_typeref(c.target_type);
+								sig.return_type = resolve_typeref(c.target_type);
 								sig.access = c.access;
 								sig.location = c.location;
 								info.conversions.push_back(std::move(sig));
@@ -445,11 +482,11 @@ namespace dino::frontend {
 						} else if (const auto* fn = dynamic_cast<const FunctionDecl*>(decl.get())) {
 							FunctionSig sig;
 							sig.name = fn->name;
-							sig.return_type = from_typeref(fn->return_type);
+							sig.return_type = resolve_typeref(fn->return_type);
 							sig.location = fn->location;
 							sig.template_params = fn->template_params;
 							for (const auto& p: fn->parameters) {
-								SemanticType pt = from_typeref(p.type);
+								SemanticType pt = resolve_typeref(p.type);
 								if (p.type.variadic) {
 									sig.variadic = true;
 								}
@@ -461,7 +498,7 @@ namespace dino::frontend {
 							functions_[fn->name].push_back(std::move(sig));
 						} else if (const auto* global = dynamic_cast<const GlobalVarDecl*>(decl.get())) {
 							GlobalVarInfo info;
-							info.type = from_typeref(global->type);
+							info.type = resolve_typeref(global->type);
 							info.type.is_array = global->is_array;
 							info.access = global->access;
 							info.is_extern = global->is_extern;
@@ -503,7 +540,7 @@ namespace dino::frontend {
 				}
 
 				for (const auto& f: st.fields) {
-					SemanticType ft = from_typeref(f.type);
+					SemanticType ft = resolve_typeref(f.type);
 					if (!is_known_type(ft) || (!is_builtin_type_name(ft.name) && !active_template_types_.contains(ft.name) &&
 											   !is_visible_symbol(ft.name) && ft.name != st.name)) {
 						error(std::source_location::current(), f.location, "In structure '{}': unknown type '{}' for field with name '{}'", st.name, f.type.name, ft.name);
@@ -555,7 +592,7 @@ namespace dino::frontend {
 									 std::ranges::any_of(fn.parameters, [](const Parameter& parameter) { return parameter.type.variadic; }),
 									 false,
 									 "");
-				SemanticType ret = from_typeref(fn.return_type);
+				SemanticType ret = resolve_typeref(fn.return_type);
 				if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
 											!is_visible_symbol(ret.name))) {
 					error(std::source_location::current(), fn.location, "Unknown return type for function '{}': '{}'", fn.name, fn.return_type.name);
@@ -563,7 +600,7 @@ namespace dino::frontend {
 
 				push_scope();
 				for (const auto& p: fn.parameters) {
-					SemanticType pt = from_typeref(p.type);
+					SemanticType pt = resolve_typeref(p.type);
 					if (!is_known_type(pt) || (!is_builtin_type_name(pt.name) && !active_template_types_.contains(pt.name) &&
 											   !is_visible_symbol(pt.name))) {
 						error(std::source_location::current(), fn.location, "In function '{}': unknown type '{}' for parameter with name {}" + p.type.name, p.name);
@@ -596,7 +633,7 @@ namespace dino::frontend {
 					error(std::source_location::current(), global.location, "Extern global '{}' cannot have an array initializer", global.name);
 				}
 
-				SemanticType global_type = from_typeref(global.type);
+				SemanticType global_type = resolve_typeref(global.type);
 				global_type.is_array = global.is_array;
 				if (!is_known_type(global_type) || (!is_builtin_type_name(global_type.name) && !is_visible_symbol(global_type.name))) {
 					error(std::source_location::current(), global.location, "Unknown type '{}' for global variable '{}'", global.type.name, global.name);
@@ -642,7 +679,7 @@ namespace dino::frontend {
 				declare_var("this", this_type);
 
 				for (const auto& p: ctor.parameters) {
-					SemanticType pt = from_typeref(p.type);
+					SemanticType pt = resolve_typeref(p.type);
 					if (!is_known_type(pt) || (!is_builtin_type_name(pt.name) && !active_template_types_.contains(pt.name) &&
 											   !is_visible_symbol(pt.name) && pt.name != owner.name)) {
 						error(std::source_location::current(), ctor.location, "In structure '{}': unknown type '{}' for constructor parameter with name '{}'", owner.name, p.type.name, p.name);
@@ -687,7 +724,7 @@ namespace dino::frontend {
 									 std::ranges::any_of(method.parameters, [](const Parameter& parameter) { return parameter.type.variadic; }),
 									 true,
 									 owner.name);
-				SemanticType ret = from_typeref(method.return_type);
+				SemanticType ret = resolve_typeref(method.return_type);
 				if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
 											!is_visible_symbol(ret.name) && ret.name != owner.name)) {
 					error(std::source_location::current(), method.location, "In structure '{}': in method '{}': unknown return type: '{}'", owner.name, method.name, method.return_type.name);
@@ -703,7 +740,7 @@ namespace dino::frontend {
 				}
 
 				for (const auto& p: method.parameters) {
-					SemanticType pt = from_typeref(p.type);
+					SemanticType pt = resolve_typeref(p.type);
 					if (!is_known_type(pt) || (!is_builtin_type_name(pt.name) && !active_template_types_.contains(pt.name) &&
 											   !is_visible_symbol(pt.name) && pt.name != owner.name)) {
 						error(std::source_location::current(), method.location, "In structure '{}': in method '{}': unknown type '{}' for parameter with name '{}'", owner.name, method.name, p.type.name, p.name);
@@ -801,7 +838,7 @@ namespace dino::frontend {
 			}
 
 			void check_conversion(const StructDecl& owner, const ConversionDecl& conv) {
-				SemanticType ret = from_typeref(conv.target_type);
+				SemanticType ret = resolve_typeref(conv.target_type);
 				if (!is_known_type(ret) || (!is_builtin_type_name(ret.name) && !active_template_types_.contains(ret.name) &&
 											!is_visible_symbol(ret.name) && ret.name != owner.name)) {
 					error(std::source_location::current(), conv.location, "In structure '{}': unknown convertor type: '{}'", owner.name, conv.target_type.name);
@@ -1036,7 +1073,7 @@ namespace dino::frontend {
 				}
 
 				if (const auto* s = dynamic_cast<const VarDeclStmt*>(stmt)) {
-					SemanticType var_type = from_typeref(s->type);
+					SemanticType var_type = resolve_typeref(s->type);
 					var_type.is_array = s->is_array;
 					if (!is_known_type(var_type) || (!is_builtin_type_name(var_type.name) && !is_visible_symbol(var_type.name))) {
 						error(std::source_location::current(), s->location, "Unknown type '{}' for variable with name '{}'", s->type.name, s->name);
@@ -1093,11 +1130,51 @@ namespace dino::frontend {
 				if (const auto* s = dynamic_cast<const ForStmt*>(stmt)) {
 					push_scope();
 					if (s->range_var.has_value()) {
-						SemanticType it_type = from_typeref(s->range_var->type);
+						SemanticType it_type = resolve_typeref(s->range_var->type);
 						declare_var(s->range_var->name, it_type);
 						SemanticType range_t = infer_expr_type(s->range_expr.get());
-						if (!(range_t.is_array || range_t.pointer_depth > 0)) {
-							warning(s->location, "for-in expects array on right side");
+						const StructInfo* struct_info = find_struct_info(range_t.name);
+						if (struct_info == nullptr) {
+							error(std::source_location::current(), s->location, "for-in expects a structure with begin/end methods on the right side");
+						} else {
+							auto resolve_range_method = [&](const std::string& method_name) -> SemanticType {
+								const auto mit = struct_info->methods.find(method_name);
+								if (mit == struct_info->methods.end()) {
+									error(std::source_location::current(), s->location, "for-in range type '{}' does not define method '{}()'", struct_info->name, method_name);
+									return SemanticType::error();
+								}
+								if (const FunctionSig* sig = choose_method_overload({}, mit->second, false)) {
+									return sig->return_type;
+								}
+								for (const auto& sig: mit->second) {
+									if (sig.is_static) {
+										continue;
+									}
+									if (const auto deduced = try_match_template_overload({}, sig)) {
+										return *deduced;
+									}
+								}
+								error(std::source_location::current(), s->location, "for-in cannot resolve '{}' overload without arguments", method_name);
+								return SemanticType::error();
+							};
+
+							SemanticType begin_t = resolve_range_method("begin");
+							SemanticType end_t = resolve_range_method("end");
+							if (!begin_t.is_error && begin_t.pointer_depth == 0) {
+								error(std::source_location::current(), s->location, "for-in requires begin() to return a pointer type");
+							}
+							if (!end_t.is_error && end_t.pointer_depth == 0) {
+								error(std::source_location::current(), s->location, "for-in requires end() to return a pointer type");
+							}
+							if (!begin_t.is_error && !end_t.is_error && !is_assignable_to(begin_t, end_t) && !is_assignable_to(end_t, begin_t)) {
+								error(std::source_location::current(), s->location, "for-in requires begin() and end() to return compatible pointer types");
+							}
+							if (!begin_t.is_error && !is_assignable_to(begin_t, it_type)) {
+								error(std::source_location::current(), s->location, "for-in loop variable type '{}' is incompatible with begin() return type '{}'", type_to_string(it_type), type_to_string(begin_t));
+							}
+							if (!end_t.is_error && !is_assignable_to(end_t, it_type)) {
+								error(std::source_location::current(), s->location, "for-in loop variable type '{}' is incompatible with end() return type '{}'", type_to_string(it_type), type_to_string(end_t));
+							}
 						}
 					} else {
 						check_statement(s->init.get(), false, nullptr);
@@ -1448,7 +1525,7 @@ namespace dino::frontend {
 
 				if (const auto* e = dynamic_cast<const TypeCastExpr*>(expr)) {
 					SemanticType from = infer_expr_type(e->value.get());
-					SemanticType to = from_typeref(e->target_type);
+					SemanticType to = resolve_typeref(e->target_type);
 					if (!is_known_type(to) || (!is_builtin_type_name(to.name) && !active_template_types_.contains(to.name) &&
 											   !is_visible_symbol(to.name))) {
 						error(std::source_location::current(), e->location, "Unknown target type '{}' in type_cast", e->target_type.name);
@@ -1461,8 +1538,19 @@ namespace dino::frontend {
 					return SemanticType::error();
 				}
 
+				if (const auto* e = dynamic_cast<const SizeofExpr*>(expr)) {
+					SemanticType target = resolve_typeref(e->target_type);
+					if (!is_known_type(target)) {
+						error(std::source_location::current(), e->location, "Unknown type in @sizeof expression");
+						return SemanticType::error();
+					}
+					SemanticType out;
+					out.name = "uint64";
+					return out;
+				}
+
 				if (const auto* e = dynamic_cast<const NewExpr*>(expr)) {
-					SemanticType allocated = from_typeref(e->target_type);
+					SemanticType allocated = resolve_typeref(e->target_type);
 					if (!is_known_type(allocated) || (!is_builtin_type_name(allocated.name) && !active_template_types_.contains(allocated.name) &&
 													  !is_visible_symbol(allocated.name))) {
 						error(std::source_location::current(), e->location, "Unknown target type '{}' in new expression", e->target_type.name);
