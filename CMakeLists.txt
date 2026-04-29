@@ -66,12 +66,12 @@ target_sources(dinoc PRIVATE
         "src/dino/frontend/driver.cpp"
 )
 
-if (NOT MSVC AND ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
-    message(STATUS "You're using the Debug build and not on the cl-compatible compiler, asan and ubsan will be included")
-    target_compile_options(dinoc PRIVATE
-            -fsanitize=address,undefined
-            -D_DISABLE_STRING_ANNOTATION
-            -D_DISABLE_VECTOR_ANNOTATION
-    )
-    target_link_options(dinoc PRIVATE -fsanitize=address,undefined)
+if (${CMAKE_BUILD_TYPE} STREQUAL "Debug" AND NOT MSVC)
+        target_compile_options(dinoc PRIVATE 
+                -fsanitize=address,undefined 
+                -D_DISABLE_STRING_ANNOTATION 
+                -D_DISABLE_VECTOR_ANNOTATION
+        )
+        target_link_options(dinoc PRIVATE -fsanitize=address,undefined)
 endif ()
+        

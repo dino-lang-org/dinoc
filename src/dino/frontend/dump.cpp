@@ -70,16 +70,7 @@ namespace dino::frontend {
 			os << expr->kind();
 
 			if (const auto* e = dynamic_cast<const IdentifierExpr*>(expr)) {
-				os << " name=" << e->name;
-				if (!e->template_args.empty()) {
-					os << " template_args=<";
-					for (size_t i = 0; i < e->template_args.size(); ++i) {
-						if (i > 0) os << ", ";
-						os << e->template_args[i].name;
-					}
-					os << ">";
-				}
-				os << "\n";
+				os << " name=" << e->name << "\n";
 				return;
 			}
 			if (const auto* e = dynamic_cast<const LiteralExpr*>(expr)) {

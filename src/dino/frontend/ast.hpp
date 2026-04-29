@@ -75,7 +75,6 @@ namespace dino::frontend {
 
 	struct IdentifierExpr : Expr {
 		std::string name;
-		std::vector<TypeRef> template_args;
 		[[nodiscard]] std::string kind() const override { return "IdentifierExpr"; }
 	};
 
