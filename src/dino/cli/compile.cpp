@@ -123,18 +123,28 @@ namespace dino::cli {
 		backend_options.object_output_file = options.output_file;
 
 		codegen::LLVMBackend backend(backend_options);
+		err << "Starting backend generation...\n";
+		err.flush();
 		if (!backend.generate(result.units, err)) {
+			err << "Backend generation failed\n";
 			return 1;
 		}
+		err << "Backend generation succeeded\n";
+		err.flush();
 		if (backend_options.llvm_output_file.has_value() && !backend.write_ir_to_file(*backend_options.llvm_output_file, err)) {
 			return 1;
 		}
 		if (options.dump_llvm_ir && !backend.write_ir(out, err)) {
 			return 1;
 		}
+		err << "About to write object file...\n";
+		err.flush();
 		if (backend_options.object_output_file.has_value() && !backend.write_object(*backend_options.object_output_file, err)) {
+			err << "Object file write failed\n";
 			return 1;
 		}
+		err << "Object file write succeeded\n";
+		err.flush();
 
 		return 0;
 	}

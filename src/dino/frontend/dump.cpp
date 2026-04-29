@@ -112,6 +112,10 @@ namespace dino::frontend {
 				dump_expr(e->value.get(), os, level + 1);
 				return;
 			}
+			if (const auto* e = dynamic_cast<const SizeofExpr*>(expr)) {
+				os << " target=" << describe_type(e->target_type) << "\n";
+				return;
+			}
 			if (const auto* e = dynamic_cast<const NewExpr*>(expr)) {
 				os << " target=" << describe_type(e->target_type);
 				if (e->placement) {
@@ -253,6 +257,13 @@ namespace dino::frontend {
 	} // namespace
 
 	std::string describe_type(const TypeRef& type) {
+		if (type.typeof_name.has_value()) {
+			std::string out = "@typeof(" + *type.typeof_name + ")";
+			if (type.decay) {
+				out = "@decay(" + out + ")";
+			}
+			return out;
+		}
 		std::string out;
 		if (type.is_const) {
 			out += "const ";
@@ -269,6 +280,9 @@ namespace dino::frontend {
 		}
 		if (type.variadic) {
 			out += "...";
+		}
+		if (type.decay) {
+			out = "@decay(" + out + ")";
 		}
 		return out;
 	}

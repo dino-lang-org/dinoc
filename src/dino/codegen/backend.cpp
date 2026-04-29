@@ -3108,7 +3108,6 @@ namespace dino::codegen {
 								   : builder_.CreateICmpNE(lhs_ptr, rhs_ptr, "ptr.ne");
 					}
 				}
-				
 				if (is_numeric_type(lhs_type) && is_numeric_type(rhs_type)) {
 					SemanticType common = numeric_common_type(lhs_type, rhs_type);
 					llvm::Value* lhs = cast_value(emit_expression(binary.lhs.get()), lhs_type, common, false);
