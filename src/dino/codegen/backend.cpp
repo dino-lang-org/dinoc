@@ -317,6 +317,11 @@ namespace dino::codegen {
 			if (from.is_array && to.pointer_depth > 0 && from.name == to.name) {
 				return true;
 			}
+			if (from.pointer_depth > 0 && to.pointer_depth > 0) {
+				if (to.name == "void" || from.name == "void" || from.name == to.name) {
+					return true;
+				}
+			}
 			return false;
 		}
 
@@ -633,6 +638,10 @@ namespace dino::codegen {
 
 			llvm::Value* allocate_heap_block(const SemanticType& allocated_type, llvm::Value* element_count) {
 				llvm::Type* element_llvm_type = llvm_type(allocated_type);
+				if (element_llvm_type == nullptr || element_llvm_type->isVoidTy()) {
+					errors_.push_back(std::format("Unable to allocate value of type '{}'", type_to_string(allocated_type)));
+					return nullptr;
+				}
 				const llvm::DataLayout& layout = module_.getDataLayout();
 				const uint64_t element_size = layout.getTypeAllocSize(element_llvm_type);
 				const uint64_t header_size = layout.getTypeAllocSize(heap_header_type());
@@ -1210,7 +1219,29 @@ namespace dino::codegen {
 			}
 
 			SemanticType substitute_typeref(const TypeRef& type) const {
-				SemanticType result = from_typeref(type);
+				SemanticType result;
+				if (type.typeof_name.has_value()) {
+					if (const VariableInfo* variable = lookup_variable(*type.typeof_name)) {
+						result = variable->type;
+						if (result.is_array) {
+							result.is_array = false;
+							result.array_size = 0;
+							result.pointer_depth = std::max(1, result.pointer_depth);
+						}
+					} else {
+						result = SemanticType{"<error>", false, false, 0, false, false, 0, true};
+					}
+				} else {
+					result = from_typeref(type);
+				}
+				if (type.decay) {
+					result.is_const = false;
+					result.is_nonull = false;
+					result.pointer_depth = 0;
+					result.is_reference = false;
+					result.is_array = false;
+					result.array_size = 0;
+				}
 				if (const auto found = current_template_bindings_.find(result.name); found != current_template_bindings_.end()) {
 					SemanticType substituted = found->second;
 					substituted.is_const = substituted.is_const || result.is_const;
@@ -1442,15 +1473,11 @@ namespace dino::codegen {
 						free_functions_[result->name].push_back(result);
 					}
 				} else if (template_it != template_structs_.end()) {
-					if (result->kind == FunctionKind::Method) {
-						template_it->second.methods[result->name].push_back(result);
-					} else if (result->kind == FunctionKind::Constructor) {
-						template_it->second.constructors.push_back(result);
-					} else if (result->kind == FunctionKind::Destructor) {
-						template_it->second.destructor = result;
-					} else {
+					if (result->kind == FunctionKind::Free) {
 						free_functions_[result->name].push_back(result);
 					}
+					// Do not register instantiated members back into template definition containers.
+					// Concrete struct instantiations own and reference their instantiated members.
 				} else {
 					// Owner not found - this is a template instance method
 					// Don't add to any owner's list; it will be added by the struct instantiation
@@ -2052,7 +2079,9 @@ namespace dino::codegen {
 					}
 					++concrete_index;
 				}
-				current_template_bindings_ = std::move(bindings);
+				for (auto& [name, bound]: bindings) {
+					current_template_bindings_[name] = bound;
+				}
 
 				size_t arg_index = 0;
 				for (const auto& parameter: parameters) {
@@ -2593,7 +2622,11 @@ namespace dino::codegen {
 					return element_type(infer_expr_type(index->object.get()));
 				}
 				if (const auto* cast = dynamic_cast<const TypeCastExpr*>(expr)) {
-					return from_typeref(cast->target_type);
+					return substitute_typeref(cast->target_type);
+				}
+				if (const auto* size_of = dynamic_cast<const SizeofExpr*>(expr)) {
+					(void)size_of;
+					return SemanticType{"uint64"};
 				}
 				if (const auto* alloc = dynamic_cast<const NewExpr*>(expr)) {
 					// Use substitute_typeref to handle template parameter substitution
@@ -2605,6 +2638,11 @@ namespace dino::codegen {
 					return SemanticType{"void"};
 				}
 				if (const auto* call = dynamic_cast<const CallExpr*>(expr)) {
+					if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(call->callee.get())) {
+						if (const auto bound = current_template_bindings_.find(identifier->name); bound != current_template_bindings_.end()) {
+							return bound->second;
+						}
+					}
 					CallResolution resolution = resolve_call(call);
 					if (resolution.function != nullptr) {
 						// Constructor expressions evaluate to constructed values.
@@ -2873,6 +2911,17 @@ namespace dino::codegen {
 				}
 				if (const auto* cast = dynamic_cast<const TypeCastExpr*>(expr)) {
 					return emit_type_cast(*cast);
+				}
+				if (const auto* size_of = dynamic_cast<const SizeofExpr*>(expr)) {
+					SemanticType target = substitute_typeref(size_of->target_type);
+					llvm::Type* target_type = llvm_type(target);
+					if (target_type == nullptr || target_type->isVoidTy()) {
+						errors_.push_back(std::format("Unknown type in @sizeof"));
+						return llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0);
+					}
+					const llvm::DataLayout& layout = module_.getDataLayout();
+					const uint64_t sz = layout.getTypeAllocSize(target_type);
+					return llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), sz);
 				}
 				if (const auto* alloc = dynamic_cast<const NewExpr*>(expr)) {
 					return emit_new_expression(*alloc);
@@ -3259,7 +3308,7 @@ namespace dino::codegen {
 			llvm::Value* emit_type_cast(const TypeCastExpr& cast) {
 				llvm::Value* value = emit_expression(cast.value.get());
 				SemanticType from = infer_expr_type(cast.value.get());
-				SemanticType to = from_typeref(cast.target_type);
+				SemanticType to = substitute_typeref(cast.target_type);
 				return cast_value(value, from, to, false);
 			}
 
@@ -3302,24 +3351,37 @@ namespace dino::codegen {
 				if (storage == nullptr) {
 					return nullptr;
 				}
+				std::vector<llvm::Value*> new_arg_values;
+				std::vector<SemanticType> new_arg_types;
+				for (const auto& arg: expr.args) {
+					if (const auto* unary = dynamic_cast<const UnaryExpr*>(arg.get());
+						unary != nullptr && unary->op == "...") {
+						if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(unary->operand.get());
+							identifier != nullptr) {
+							if (const auto found = current_pack_bindings_.find(identifier->name); found != current_pack_bindings_.end()) {
+								for (const auto& element: found->second) {
+									new_arg_values.push_back(load_variable(VariableInfo{element.type, element.address, false}, identifier->name));
+									new_arg_types.push_back(element.type);
+								}
+								continue;
+							}
+						}
+					}
+					new_arg_values.push_back(emit_expression(arg.get()));
+					new_arg_types.push_back(infer_expr_type(arg.get()));
+				}
 
 				if (const auto struct_it = structs_.find(allocated_type.name); struct_it != structs_.end()) {
-					std::vector<SemanticType> arg_types;
-					arg_types.reserve(expr.args.size());
-					for (const auto& arg: expr.args) {
-						arg_types.push_back(infer_expr_type(arg.get()));
-					}
-					FunctionInfo* ctor = choose_overload(struct_it->second.constructors, arg_types);
+					FunctionInfo* ctor = choose_overload(struct_it->second.constructors, new_arg_types);
 					if (ctor == nullptr) {
 						errors_.push_back(std::format("Unable to resolve constructor for new {}", allocated_type.name));
 						return storage;
 					}
 
 					std::vector<llvm::Value*> ctor_args;
-					ctor_args.reserve(expr.args.size());
-					for (size_t i = 0; i < expr.args.size(); ++i) {
-						llvm::Value* value = emit_expression(expr.args[i].get());
-						value = cast_value(value, arg_types[i], ctor->params[i], true);
+					ctor_args.reserve(new_arg_values.size());
+					for (size_t i = 0; i < new_arg_values.size(); ++i) {
+						llvm::Value* value = cast_value(new_arg_values[i], new_arg_types[i], ctor->params[i], true);
 						ctor_args.push_back(value);
 					}
 
@@ -3354,18 +3416,14 @@ namespace dino::codegen {
 					return storage;
 				}
 
-				if (!expr.is_array && expr.args.size() == 1) {
-					llvm::Value* init = emit_expression(expr.args[0].get());
-					SemanticType init_type = infer_expr_type(expr.args[0].get());
-					builder_.CreateStore(cast_value(init, init_type, allocated_type, true), storage);
+				if (!expr.is_array && new_arg_values.size() == 1) {
+					builder_.CreateStore(cast_value(new_arg_values[0], new_arg_types[0], allocated_type, true), storage);
 					return storage;
 				}
 
 				llvm::Value* init_value = nullptr;
-				if (expr.args.size() == 1) {
-					init_value = emit_expression(expr.args[0].get());
-					SemanticType init_type = infer_expr_type(expr.args[0].get());
-					init_value = cast_value(init_value, init_type, allocated_type, true);
+				if (new_arg_values.size() == 1) {
+					init_value = cast_value(new_arg_values[0], new_arg_types[0], allocated_type, true);
 				} else {
 					init_value = zero_value(allocated_type);
 				}
@@ -3454,6 +3512,16 @@ namespace dino::codegen {
 						return builder_.CreateTrunc(value, llvm_type(to), "int.trunc");
 					}
 				}
+				if (from.pointer_depth > 0 && to.pointer_depth > 0 &&
+					(to.name == "void" || from.name == "void" || from.name == to.name)) {
+					return builder_.CreateBitCast(value, llvm_type(to), "ptr.cast");
+				}
+				if (from.pointer_depth == to.pointer_depth + 1 &&
+					from.name == to.name &&
+					!to.is_reference &&
+					!to.is_array) {
+					return builder_.CreateLoad(llvm_type(to), value, "ptr.deref.cast");
+				}
 				if (!implicit && !from.pointer_depth > 0 && !from.is_reference && !from.is_array) {
 					if (const auto struct_it = structs_.find(from.name); struct_it != structs_.end()) {
 						if (const auto conversion = struct_it->second.conversions.find(to.name); conversion != struct_it->second.conversions.end()) {
@@ -3469,7 +3537,8 @@ namespace dino::codegen {
 											  implicit ? "implicitly" : "explicitly",
 											  type_to_string(from),
 											  type_to_string(to)));
-				return value;
+				// Keep IR well-typed after reporting the error to avoid backend crashes.
+				return zero_value(to);
 			}
 
 			llvm::Value* promote_variadic_argument(llvm::Value* value, SemanticType& type) {
@@ -3696,6 +3765,37 @@ namespace dino::codegen {
 							}
 						}
 					}
+					if (resolution.function == nullptr) {
+						if (const auto parsed = parse_template_instantiation(object_type.name)) {
+							const auto& [base_name, _] = *parsed;
+							if (const auto template_it = template_structs_.find(base_name); template_it != template_structs_.end()) {
+								if (const auto methods = template_it->second.methods.find(member->member); methods != template_it->second.methods.end()) {
+									// Instantiation mutates method registries; iterate over a snapshot.
+									const std::vector<FunctionInfo*> candidates = methods->second;
+									for (FunctionInfo* candidate: candidates) {
+										if (candidate == nullptr || candidate->is_static_method || candidate->template_params.empty()) {
+											continue;
+										}
+										if (FunctionInfo* instance = instantiate_template_function(candidate, arg_types)) {
+											// Bind instantiated method to concrete owner type.
+											instance->owner = object_type.name;
+											instance->is_template_instance = true;
+											if (const auto concrete_it = structs_.find(object_type.name); concrete_it != structs_.end()) {
+												concrete_it->second.methods[member->member].push_back(instance);
+											}
+											resolution.function = instance;
+											break;
+										}
+									}
+								}
+							}
+						}
+					}
+					if (resolution.function != nullptr && resolution.object_address == nullptr) {
+						resolution.object_type = object_type;
+						resolution.object_address = member->via_arrow ? emit_expression(member->object.get())
+																	  : ensure_address(member->object.get(), infer_expr_type(member->object.get()));
+					}
 				}
 				return resolution;
 			}
@@ -3739,6 +3839,34 @@ namespace dino::codegen {
 			}
 
 			llvm::Value* emit_call(const CallExpr& call) {
+				if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(call.callee.get())) {
+					if (const auto bound = current_template_bindings_.find(identifier->name); bound != current_template_bindings_.end()) {
+						const SemanticType target_type = bound->second;
+						const std::vector<ExpandedCallArgument> expanded_args = expanded_call_args(call);
+						if (const auto struct_it = structs_.find(target_type.name); struct_it != structs_.end()) {
+							std::vector<SemanticType> arg_types;
+							arg_types.reserve(expanded_args.size());
+							for (const auto& arg: expanded_args) {
+								arg_types.push_back(arg.type);
+							}
+							FunctionInfo* ctor = choose_overload(struct_it->second.constructors, arg_types);
+							if (ctor != nullptr) {
+								llvm::AllocaInst* tmp = create_entry_alloca(current_function_, llvm_type(target_type), "templ.ctor.tmp");
+								std::vector<llvm::Value*> ctor_args;
+								ctor_args.push_back(tmp);
+								for (size_t i = 0; i < expanded_args.size(); ++i) {
+									ctor_args.push_back(cast_value(expanded_args[i].value, expanded_args[i].type, ctor->params[i], true));
+								}
+								builder_.CreateCall(ctor->llvm_function, ctor_args);
+								return builder_.CreateLoad(llvm_type(target_type), tmp, "templ.ctor.value");
+							}
+						}
+						if (expanded_args.size() == 1) {
+							return cast_value(expanded_args[0].value, expanded_args[0].type, target_type, true);
+						}
+					}
+				}
+
 				CallResolution resolution = resolve_call(&call);
 				if (resolution.function == nullptr || resolution.function->llvm_function == nullptr) {
 					std::string callee = call.callee != nullptr ? call.callee->kind() : "<null>";
@@ -3852,7 +3980,7 @@ namespace dino::codegen {
 			}
 
 			void emit_var_decl(const VarDeclStmt& variable) {
-				SemanticType type = from_typeref(variable.type);
+				SemanticType type = substitute_typeref(variable.type);
 				if (variable.is_static) {
 					SemanticType static_type = type;
 					if (variable.is_array) {
@@ -4098,14 +4226,50 @@ namespace dino::codegen {
 			void emit_range_for(const ForStmt& for_stmt) {
 				const Parameter& range_var = *for_stmt.range_var;
 				SemanticType range_type = infer_expr_type(for_stmt.range_expr.get());
-				if (!range_type.is_array) {
-					errors_.push_back("Range-for currently supports only local arrays");
+				const auto struct_it = structs_.find(range_type.name);
+				if (struct_it == structs_.end()) {
+					errors_.push_back("Range-for expects a structure with begin/end methods");
+					return;
+				}
+				const StructInfo& struct_info = struct_it->second;
+				auto resolve_range_method = [&](const std::string& method_name) -> FunctionInfo* {
+					const auto methods = struct_info.methods.find(method_name);
+					if (methods == struct_info.methods.end()) {
+						return nullptr;
+					}
+					std::vector<FunctionInfo*> candidates;
+					for (FunctionInfo* fn: methods->second) {
+						if (fn != nullptr && !fn->is_static_method && fn->params.empty()) {
+							candidates.push_back(fn);
+						}
+					}
+					if (candidates.empty()) {
+						return nullptr;
+					}
+					return choose_overload(candidates, {});
+				};
+				FunctionInfo* begin_method = resolve_range_method("begin");
+				FunctionInfo* end_method = resolve_range_method("end");
+				if (begin_method == nullptr || end_method == nullptr) {
+					errors_.push_back("Range-for cannot resolve begin/end methods with empty argument list");
 					return;
 				}
 
-				SemanticType index_type = from_typeref(range_var.type);
+				SemanticType index_type = substitute_typeref(range_var.type);
+				llvm::Value* object_address = ensure_address(for_stmt.range_expr.get(), range_type);
+				if (object_address == nullptr) {
+					errors_.push_back("Range-for requires addressable range object");
+					return;
+				}
+				llvm::Value* begin_value = builder_.CreateCall(begin_method->llvm_function, {object_address}, "range.begin");
+				llvm::Value* end_value = builder_.CreateCall(end_method->llvm_function, {object_address}, "range.end");
+				begin_value = cast_value(begin_value, begin_method->return_type, index_type, true);
+				end_value = cast_value(end_value, end_method->return_type, index_type, true);
+
 				llvm::AllocaInst* index_slot = create_entry_alloca(current_function_, llvm_type(index_type), range_var.name);
-				builder_.CreateStore(builder_.getInt32(0), index_slot);
+				builder_.CreateStore(begin_value, index_slot);
+				llvm::AllocaInst* end_slot = create_entry_alloca(current_function_, llvm_type(index_type), "range.end.value");
+				builder_.CreateStore(end_value, end_slot);
 				declare_variable(range_var.name, VariableInfo{index_type, index_slot, false});
 
 				llvm::Function* function = current_function_;
@@ -4117,8 +4281,8 @@ namespace dino::codegen {
 
 				builder_.SetInsertPoint(cond_block);
 				llvm::Value* index_value = builder_.CreateLoad(llvm_type(index_type), index_slot, "range.idx");
-				llvm::Value* limit = llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), range_type.array_size);
-				llvm::Value* condition = builder_.CreateICmpSLT(index_value, limit, "range.has_next");
+				llvm::Value* limit = builder_.CreateLoad(llvm_type(index_type), end_slot, "range.limit");
+				llvm::Value* condition = builder_.CreateICmpNE(index_value, limit, "range.has_next");
 				builder_.CreateCondBr(condition, body_block, end_block);
 
 				builder_.SetInsertPoint(body_block);
@@ -4128,7 +4292,16 @@ namespace dino::codegen {
 				}
 
 				builder_.SetInsertPoint(step_block);
-				llvm::Value* next = builder_.CreateAdd(builder_.CreateLoad(llvm_type(index_type), index_slot), builder_.getInt32(1));
+				if (index_type.pointer_depth == 0) {
+					errors_.push_back("Range-for loop variable must be a pointer type");
+					builder_.CreateBr(end_block);
+					builder_.SetInsertPoint(end_block);
+					return;
+				}
+				SemanticType pointee = index_type;
+				pointee.pointer_depth = std::max(0, pointee.pointer_depth - 1);
+				llvm::Value* current = builder_.CreateLoad(llvm_type(index_type), index_slot, "range.current");
+				llvm::Value* next = builder_.CreateInBoundsGEP(llvm_type(pointee), current, builder_.getInt64(1), "range.next");
 				builder_.CreateStore(next, index_slot);
 				builder_.CreateBr(cond_block);
 

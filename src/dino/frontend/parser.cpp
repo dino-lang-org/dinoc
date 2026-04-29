@@ -546,7 +546,26 @@ namespace dino::frontend {
 					advance();
 				}
 
-				if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
+				if (match(TokenType::At)) {
+					if (match(TokenType::KwTypeof)) {
+						expect(TokenType::LParen, "Expected '(' after @typeof");
+						auto var = expect(TokenType::Identifier, "Expected variable name in @typeof(...)");
+						expect(TokenType::RParen, "Expected ')' after @typeof(...)");
+						type.name = "<typeof>";
+						if (var) {
+							type.typeof_name = var->lexeme;
+						}
+					} else if (match(TokenType::KwDecay)) {
+						expect(TokenType::LParen, "Expected '(' after @decay");
+						type = parse_type_ref();
+						expect(TokenType::RParen, "Expected ')' after @decay(...)");
+						type.decay = true;
+					} else {
+						error(std::source_location::current(), previous(), "Unknown type directive after '@'");
+						type.name = "<error>";
+						return type;
+					}
+				} else if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
 					type.name = advance().lexeme;
 				} else {
 					error(std::source_location::current(), current(), "Expected type name");
@@ -555,7 +574,7 @@ namespace dino::frontend {
 				}
 
 				// Parse template arguments like Array<int32>
-				if (check(TokenType::Less)) {
+				if (!type.typeof_name.has_value() && check(TokenType::Less)) {
 					advance();
 					std::string template_args = "<";
 					while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
@@ -1179,28 +1198,56 @@ namespace dino::frontend {
 					auto id = std::make_unique<IdentifierExpr>();
 					id->location = previous().location;
 					id->name = previous().lexeme;
-					// Parse template arguments for identifier expressions like Array<int32>
+					// Parse template arguments for identifier expressions like Array<int32>.
+					// Use tentative parsing with rollback so binary comparisons like `i < n`
+					// are not treated as template argument lists.
+					const size_t saved_pos = pos_;
 					if (check(TokenType::Less)) {
 						advance();
 						std::string template_args = "<";
-						while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
-							// Parse simple type name for template argument
-							if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
-								template_args += advance().lexeme;
-							} else {
+						bool ok = true;
+						bool expect_arg = true;
+						while (!check(TokenType::EndOfFile)) {
+							if (expect_arg) {
+								if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
+									template_args += advance().lexeme;
+									expect_arg = false;
+									continue;
+								}
+								ok = false;
 								break;
 							}
 							if (match(TokenType::Comma)) {
 								template_args += ",";
-							} else {
+								expect_arg = true;
+								continue;
+							}
+							if (check(TokenType::Greater)) {
 								break;
 							}
+							ok = false;
+							break;
 						}
-						template_args += ">";
-						expect(TokenType::Greater, "Expected '>' after template arguments");
-						id->name += template_args;
+						if (ok && check(TokenType::Greater) && !expect_arg) {
+							advance();
+							template_args += ">";
+							id->name += template_args;
+						} else {
+							pos_ = saved_pos;
+						}
 					}
 					return id;
+				}
+				if (match(TokenType::At)) {
+					if (match(TokenType::KwSizeof)) {
+						auto expr = std::make_unique<SizeofExpr>();
+						expr->location = previous().location;
+						expect(TokenType::LParen, "Expected '(' after @sizeof");
+						expr->target_type = parse_type_ref();
+						expect(TokenType::RParen, "Expected ')' after @sizeof(...)");
+						return expr;
+					}
+					error(std::source_location::current(), previous(), "Only @sizeof(...) is allowed in expression position");
 				}
 				if (match(TokenType::LParen)) {
 					auto expr = parse_expression();
@@ -1335,14 +1382,37 @@ namespace dino::frontend {
 				if (is_builtin_type(t.type)) {
 					return true;
 				}
-				return t.type == TokenType::Identifier;
+				return t.type == TokenType::Identifier || t.type == TokenType::At;
 			}
 
 			void consume_type_preview(size_t& idx) const {
 				while (at(idx).type == TokenType::Identifier && (at(idx).lexeme == "const" || at(idx).lexeme == "nonull")) {
 					++idx;
 				}
-				if (is_builtin_type(at(idx).type) || at(idx).type == TokenType::Identifier) {
+				if (at(idx).type == TokenType::At) {
+					++idx;
+					if (at(idx).type == TokenType::KwTypeof) {
+						++idx;
+						if (at(idx).type == TokenType::LParen) {
+							++idx;
+						}
+						if (at(idx).type == TokenType::Identifier) {
+							++idx;
+						}
+						if (at(idx).type == TokenType::RParen) {
+							++idx;
+						}
+					} else if (at(idx).type == TokenType::KwDecay) {
+						++idx;
+						if (at(idx).type == TokenType::LParen) {
+							++idx;
+						}
+						consume_type_preview(idx);
+						if (at(idx).type == TokenType::RParen) {
+							++idx;
+						}
+					}
+				} else if (is_builtin_type(at(idx).type) || at(idx).type == TokenType::Identifier) {
 					++idx;
 					// Skip template arguments
 					if (at(idx).type == TokenType::Less) {
