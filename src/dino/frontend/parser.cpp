@@ -145,7 +145,9 @@ namespace dino::frontend {
 					}
 					auto decl = parse_struct_decl(access);
 					if (decl) {
-						decl->template_params = std::move(template_params);
+						if (!template_params.empty()) {
+							decl->template_params.insert(decl->template_params.begin(), template_params.begin(), template_params.end());
+						}
 					}
 					if (attributes.has_req && !attributes.req_matches) {
 						last_decl_was_skipped_ = true;
@@ -241,6 +243,10 @@ namespace dino::frontend {
 				decl->location = name->location;
 				decl->access = access;
 				decl->name = name->lexeme;
+				if (check(TokenType::Less)) {
+					// Support `struct Name<T> { ... }` syntax.
+					decl->template_params = parse_template_params();
+				}
 
 				expect(TokenType::LBrace, "Expected '{' after field declaration");
 
@@ -546,6 +552,28 @@ namespace dino::frontend {
 					error(std::source_location::current(), current(), "Expected type name");
 					type.name = "<error>";
 					return type;
+				}
+
+				// Parse template arguments like Array<int32>
+				if (check(TokenType::Less)) {
+					advance();
+					std::string template_args = "<";
+					while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
+						// Parse simple type name for template argument
+						if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
+							template_args += advance().lexeme;
+						} else {
+							break;
+						}
+						if (match(TokenType::Comma)) {
+							template_args += ",";
+						} else {
+							break;
+						}
+					}
+					template_args += ">";
+					expect(TokenType::Greater, "Expected '>' after template arguments");
+					type.name += template_args;
 				}
 
 				while (true) {
@@ -1151,6 +1179,27 @@ namespace dino::frontend {
 					auto id = std::make_unique<IdentifierExpr>();
 					id->location = previous().location;
 					id->name = previous().lexeme;
+					// Parse template arguments for identifier expressions like Array<int32>
+					if (check(TokenType::Less)) {
+						advance();
+						std::string template_args = "<";
+						while (!check(TokenType::Greater) && !check(TokenType::EndOfFile)) {
+							// Parse simple type name for template argument
+							if (is_builtin_type(current().type) || current().type == TokenType::Identifier) {
+								template_args += advance().lexeme;
+							} else {
+								break;
+							}
+							if (match(TokenType::Comma)) {
+								template_args += ",";
+							} else {
+								break;
+							}
+						}
+						template_args += ">";
+						expect(TokenType::Greater, "Expected '>' after template arguments");
+						id->name += template_args;
+					}
 					return id;
 				}
 				if (match(TokenType::LParen)) {
@@ -1295,6 +1344,21 @@ namespace dino::frontend {
 				}
 				if (is_builtin_type(at(idx).type) || at(idx).type == TokenType::Identifier) {
 					++idx;
+					// Skip template arguments
+					if (at(idx).type == TokenType::Less) {
+						++idx;
+						while (at(idx).type != TokenType::Greater && at(idx).type != TokenType::EndOfFile) {
+							consume_type_preview(idx);
+							if (at(idx).type == TokenType::Comma) {
+								++idx;
+							} else {
+								break;
+							}
+						}
+						if (at(idx).type == TokenType::Greater) {
+							++idx;
+						}
+					}
 				}
 				while (at(idx).type == TokenType::Star || at(idx).type == TokenType::And) {
 					++idx;
@@ -1398,7 +1462,7 @@ namespace dino::frontend {
 				final_format_msg += "Src=";
 				final_format_msg += src_location.file_name();
 				final_format_msg += ":";
-				final_format_msg += src_location.line();
+				final_format_msg += std::to_string(src_location.line());
 				final_format_msg += ": ";
 #endif
 				final_format_msg += format;

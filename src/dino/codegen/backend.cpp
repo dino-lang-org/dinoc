@@ -157,6 +157,18 @@ namespace dino::codegen {
 			return result;
 		}
 
+		SemanticType from_typeref_string(const std::string& type_str) {
+			SemanticType result;
+			result.name = type_str;
+			result.is_const = false;
+			result.is_nonull = false;
+			result.pointer_depth = 0;
+			result.is_reference = false;
+			result.is_array = false;
+			result.array_size = 0;
+			return result;
+		}
+
 		std::string template_param_key(const std::vector<TemplateParam>& params) {
 			std::string key;
 			for (const auto& param: params) {
@@ -338,6 +350,18 @@ namespace dino::codegen {
 					flush_errors();
 					return false;
 				}
+				// Second pass: define functions for template structs instantiated during code generation
+				define_template_struct_functions();
+				if (!errors_.empty()) {
+					flush_errors();
+					return false;
+				}
+				// Third pass: define all template function instances
+				define_template_function_instances();
+				if (!errors_.empty()) {
+					flush_errors();
+					return false;
+				}
 				if (llvm::verifyModule(module_, &llvm::errs())) {
 					err_ << "LLVM verifier rejected generated module\n";
 					return false;
@@ -372,6 +396,7 @@ namespace dino::codegen {
 			std::ostream& err_;
 			const std::unordered_map<std::string, std::unique_ptr<TranslationUnit>>* units_ = nullptr;
 			std::unordered_map<std::string, StructInfo> structs_;
+			std::unordered_map<std::string, StructInfo> template_structs_;
 			std::unordered_map<std::string, std::vector<FunctionInfo*>> free_functions_;
 			std::unordered_map<std::string, std::vector<FunctionInfo*>> template_free_functions_;
 			std::unordered_map<std::string, GlobalVarInfo> globals_;
@@ -555,7 +580,13 @@ namespace dino::codegen {
 				if (address == nullptr || !type_has_destructor(type)) {
 					return;
 				}
-				const StructInfo& info = structs_.at(type.name);
+				const auto it = structs_.find(type.name);
+				const auto template_it = template_structs_.find(type.name);
+				if (it == structs_.end() && template_it == template_structs_.end()) {
+					errors_.push_back(std::format("Cannot find struct '{}' for destructor call", type.name));
+					return;
+				}
+				const StructInfo& info = (it != structs_.end()) ? it->second : template_it->second;
 				builder_.CreateCall(info.destructor->llvm_function, {address});
 			}
 
@@ -701,7 +732,12 @@ namespace dino::codegen {
 									}
 								}
 							}
-							structs_[struct_decl->name] = std::move(info);
+							// Store template structs in template_structs_, regular structs in structs_
+							if (!struct_decl->template_params.empty()) {
+								template_structs_[struct_decl->name] = std::move(info);
+							} else {
+								structs_[struct_decl->name] = std::move(info);
+							}
 						}
 					}
 				}
@@ -757,13 +793,24 @@ namespace dino::codegen {
 						if (struct_decl == nullptr) {
 							continue;
 						}
-						StructInfo& owner = structs_[struct_decl->name];
+						// Look in both structs_ and template_structs_ for the struct
+						StructInfo* owner_ptr = nullptr;
+						if (const auto it = structs_.find(struct_decl->name); it != structs_.end()) {
+							owner_ptr = &it->second;
+						} else if (const auto it = template_structs_.find(struct_decl->name); it != template_structs_.end()) {
+							owner_ptr = &it->second;
+						}
+						if (owner_ptr == nullptr) {
+							continue;
+						}
+						StructInfo& owner = *owner_ptr;
 						for (const auto& constructor_decl: struct_decl->constructors) {
 							auto info = std::make_unique<FunctionInfo>();
 							info->kind = FunctionKind::Constructor;
 							info->owner = struct_decl->name;
 							info->name = struct_decl->name;
-							info->return_type = SemanticType{struct_decl->name};
+							// Constructors return void (they modify struct in-place via this pointer)
+							info->return_type = SemanticType{"void"};
 							info->owner_unit = unit.get();
 							info->constructor = &constructor_decl;
 							for (const auto& parameter: constructor_decl.parameters) {
@@ -876,6 +923,30 @@ namespace dino::codegen {
 				return std::format("conv {} {}()", type_to_string(function.return_type), function.owner);
 			}
 
+			std::optional<std::pair<std::string, std::vector<SemanticType>>> parse_template_instantiation(const std::string& type_name) const {
+				size_t lt_pos = type_name.find('<');
+				size_t gt_pos = type_name.rfind('>');
+				if (lt_pos == std::string::npos || gt_pos == std::string::npos || gt_pos <= lt_pos) {
+					return std::nullopt;
+				}
+				std::string base_name = type_name.substr(0, lt_pos);
+				std::string args_str = type_name.substr(lt_pos + 1, gt_pos - lt_pos - 1);
+				std::vector<SemanticType> args;
+				size_t pos = 0;
+				while (pos < args_str.size()) {
+					size_t comma_pos = args_str.find(',', pos);
+					if (comma_pos == std::string::npos) {
+						comma_pos = args_str.size();
+					}
+					std::string arg_name = args_str.substr(pos, comma_pos - pos);
+					SemanticType arg;
+					arg.name = arg_name;
+					args.push_back(arg);
+					pos = comma_pos + 1;
+				}
+				return std::make_pair(base_name, args);
+			}
+
 			llvm::Type* llvm_type(const SemanticType& type, bool decay_array = false) {
 				// Array types must be checked first: an array of pointers (e.g.
 				// `const char* x[]`) has both pointer_depth > 0 *and* is_array,
@@ -885,6 +956,10 @@ namespace dino::codegen {
 						return llvm::PointerType::get(context_, 0);
 					}
 					return llvm::ArrayType::get(llvm_type(element_type(type)), type.array_size);
+				}
+				// Handle void* specially - it's just a pointer type
+				if (type.name == "void" && type.pointer_depth > 0) {
+					return llvm::PointerType::get(context_, 0);
 				}
 				if (type.is_reference || type.pointer_depth > 0) {
 					return llvm::PointerType::get(context_, 0);
@@ -915,6 +990,202 @@ namespace dino::codegen {
 				}
 				if (const auto found = structs_.find(type.name); found != structs_.end()) {
 					return found->second.llvm_type;
+				}
+				// Also check template_structs_ for template definitions
+				// This is needed when processing function signatures that reference the template name
+				if (const auto found = template_structs_.find(type.name); found != template_structs_.end()) {
+					// For template definitions, return an opaque type that will be defined when instantiated
+					// This allows us to process template function signatures
+					if (found->second.llvm_type == nullptr) {
+						found->second.llvm_type = llvm::StructType::create(context_, type.name);
+					}
+					return found->second.llvm_type;
+				}
+				// Handle template instantiation types like "Array<int32>"
+				if (const auto parsed = parse_template_instantiation(type.name)) {
+					const auto& [base_name, args] = *parsed;
+					// Look in both structs_ and template_structs_ for the base template
+					const auto base_struct = structs_.find(base_name);
+					const auto base_template = template_structs_.find(base_name);
+					const StructInfo* base_info = nullptr;
+					if (base_struct != structs_.end()) {
+						base_info = &base_struct->second;
+					} else if (base_template != template_structs_.end()) {
+						base_info = &base_template->second;
+					}
+					if (base_info != nullptr) {
+						// Check if this instantiation already exists
+						if (const auto inst_struct = structs_.find(type.name); inst_struct != structs_.end()) {
+							return inst_struct->second.llvm_type;
+						}
+						// Create new struct instance
+						StructInfo inst_struct;
+						inst_struct.decl = base_info->decl;
+						inst_struct.llvm_type = llvm::StructType::create(context_, type.name);
+						// Substitute template parameters in fields
+						std::unordered_map<std::string, SemanticType> bindings;
+						const auto& template_params = base_info->decl->template_params;
+						if (template_params.size() != args.size()) {
+							errors_.push_back(std::format("Template parameter count mismatch for '{}': expected {}, got {}", type.name, template_params.size(), args.size()));
+							return llvm::Type::getVoidTy(context_);
+						}
+						for (size_t i = 0; i < template_params.size(); ++i) {
+							bindings[template_params[i].name] = args[i];
+						}
+						for (const auto& field: base_info->fields) {
+							FieldInfo inst_field = field;
+							inst_field.type = substitute_semantic_type(field.type, bindings);
+							inst_struct.fields.push_back(inst_field);
+							inst_struct.field_indices[field.name] = inst_struct.fields.size() - 1;
+						}
+						// Instantiate constructors, methods, and destructor
+						for (FunctionInfo* constructor: base_info->constructors) {
+							if (!constructor->template_params.empty()) {
+								std::vector<SemanticType> ctor_args;
+								for (const auto& param: constructor->params) {
+									ctor_args.push_back(substitute_semantic_type(param, bindings));
+								}
+								if (FunctionInfo* inst_ctor = instantiate_template_function(constructor, ctor_args)) {
+									// Update the owner to the instantiated struct name
+									inst_ctor->owner = type.name;
+									inst_struct.constructors.push_back(inst_ctor);
+								}
+							} else {
+								// For non-template constructors, create a copy with updated owner and types
+								auto ctor_copy = std::make_unique<FunctionInfo>(*constructor);
+								ctor_copy->owner = type.name;
+								// Mark as template instance so define_constructor sets up template bindings
+								ctor_copy->is_template_instance = true;
+								// Substitute types in parameters and return type
+								for (auto& param: ctor_copy->params) {
+									param = substitute_semantic_type(param, bindings);
+								}
+								ctor_copy->return_type = substitute_semantic_type(constructor->return_type, bindings);
+								ctor_copy->llvm_name = mangle_constructor(*ctor_copy);
+								// Create LLVM function for the constructor
+								std::vector<llvm::Type*> llvm_params;
+								llvm_params.push_back(llvm::PointerType::get(context_, 0)); // this pointer
+								for (const auto& parameter: ctor_copy->params) {
+									llvm_params.push_back(llvm_type(parameter, true));
+								}
+								llvm::FunctionType* function_type =
+									llvm::FunctionType::get(llvm_type(ctor_copy->return_type), llvm_params, ctor_copy->variadic);
+								ctor_copy->llvm_function = llvm::Function::Create(function_type,
+																				 llvm::Function::ExternalLinkage,
+																				 ctor_copy->llvm_name,
+																				 module_);
+								FunctionInfo* ctor_ptr = ctor_copy.get();
+								owned_functions_.push_back(std::move(ctor_copy));
+								inst_struct.constructors.push_back(ctor_ptr);
+							}
+						}
+						for (const auto& [method_name, methods]: base_info->methods) {
+							for (FunctionInfo* method: methods) {
+								// Skip variadic template methods for now - they're not used in the current instantiation
+								bool has_variadic_template = false;
+								for (const auto& tp: method->template_params) {
+									if (tp.is_pack) {
+										has_variadic_template = true;
+										break;
+									}
+								}
+								if (has_variadic_template) {
+									// Don't instantiate variadic template methods at struct instantiation time
+									// They will be instantiated when called
+									continue;
+								}
+								if (!method->template_params.empty()) {
+									std::vector<SemanticType> method_args;
+									for (const auto& param: method->params) {
+										method_args.push_back(substitute_semantic_type(param, bindings));
+									}
+									if (FunctionInfo* inst_method = instantiate_template_function(method, method_args)) {
+										// Update the owner to the instantiated struct name
+										inst_method->owner = type.name;
+										inst_method->is_template_instance = true;
+										inst_struct.methods[method_name].push_back(inst_method);
+									}
+								} else {
+									// For non-template methods, create a copy with updated owner and types
+									auto method_copy = std::make_unique<FunctionInfo>(*method);
+									method_copy->owner = type.name;
+									// Mark as template instance so define_method sets up template bindings
+									method_copy->is_template_instance = true;
+									// Substitute types in parameters and return type
+									for (auto& param: method_copy->params) {
+										param = substitute_semantic_type(param, bindings);
+									}
+									method_copy->return_type = substitute_semantic_type(method->return_type, bindings);
+									method_copy->llvm_name = mangle_method(*method_copy);
+									// Create LLVM function for the method
+									std::vector<llvm::Type*> llvm_params;
+									if (!method_copy->is_static_method) {
+										llvm_params.push_back(llvm::PointerType::get(context_, 0)); // this pointer
+									}
+									for (const auto& parameter: method_copy->params) {
+										llvm_params.push_back(llvm_type(parameter, true));
+									}
+									llvm::FunctionType* function_type =
+										llvm::FunctionType::get(llvm_type(method_copy->return_type), llvm_params, method_copy->variadic);
+									method_copy->llvm_function = llvm::Function::Create(function_type,
+																						llvm::Function::ExternalLinkage,
+																						method_copy->llvm_name,
+																						module_);
+									FunctionInfo* method_ptr = method_copy.get();
+									owned_functions_.push_back(std::move(method_copy));
+									inst_struct.methods[method_name].push_back(method_ptr);
+								}
+							}
+						}
+						if (base_info->destructor != nullptr && !base_info->destructor->template_params.empty()) {
+							if (FunctionInfo* inst_dtor = instantiate_template_function(base_info->destructor, {})) {
+								// Update the owner to the instantiated struct name
+								inst_dtor->owner = type.name;
+								inst_struct.destructor = inst_dtor;
+							}
+						} else if (base_info->destructor != nullptr) {
+							// For non-template destructor, create a copy with updated owner and types
+							auto dtor_copy = std::make_unique<FunctionInfo>(*base_info->destructor);
+							dtor_copy->owner = type.name;
+							// Mark as template instance so define_destructor sets up template bindings
+							dtor_copy->is_template_instance = true;
+							// Substitute types in parameters and return type
+							for (auto& param: dtor_copy->params) {
+								param = substitute_semantic_type(param, bindings);
+							}
+							dtor_copy->return_type = substitute_semantic_type(base_info->destructor->return_type, bindings);
+							dtor_copy->llvm_name = mangle_destructor(*dtor_copy);
+							// Create LLVM function for the destructor
+							std::vector<llvm::Type*> llvm_params;
+							llvm_params.push_back(llvm::PointerType::get(context_, 0)); // this pointer
+							for (const auto& parameter: dtor_copy->params) {
+								llvm_params.push_back(llvm_type(parameter, true));
+							}
+							llvm::FunctionType* function_type =
+								llvm::FunctionType::get(llvm_type(dtor_copy->return_type), llvm_params, dtor_copy->variadic);
+							dtor_copy->llvm_function = llvm::Function::Create(function_type,
+																				 llvm::Function::ExternalLinkage,
+																				 dtor_copy->llvm_name,
+																				 module_);
+							FunctionInfo* dtor_ptr = dtor_copy.get();
+							owned_functions_.push_back(std::move(dtor_copy));
+							inst_struct.destructor = dtor_ptr;
+						}
+						// Define the struct body immediately
+						std::vector<llvm::Type*> field_types;
+						field_types.reserve(inst_struct.fields.size());
+						for (const auto& field: inst_struct.fields) {
+							llvm::Type* field_type = llvm_type(field.type);
+							if (field_type == nullptr) {
+								errors_.push_back(std::format("Failed to get LLVM type for field '{}' in template instantiation '{}'", field.name, type.name));
+								return llvm::Type::getVoidTy(context_);
+							}
+							field_types.push_back(field_type);
+						}
+						inst_struct.llvm_type->setBody(field_types, false);
+						structs_[type.name] = std::move(inst_struct);
+						return structs_[type.name].llvm_type;
+					}
 				}
 				errors_.push_back(std::format("Unknown Dino type '{}'", type_to_string(type)));
 				return llvm::Type::getVoidTy(context_);
@@ -951,6 +1222,32 @@ namespace dino::codegen {
 						substituted.array_size = result.array_size;
 					}
 					return substituted;
+				}
+				// Check if this is a template instantiation that needs to be resolved
+				size_t lt_pos = result.name.find('<');
+				size_t gt_pos = result.name.rfind('>');
+				if (lt_pos != std::string::npos && gt_pos != std::string::npos && gt_pos > lt_pos) {
+					// This is a template instantiation like Array<int32>
+					// Return it as-is - llvm_type will handle the instantiation
+					return result;
+				}
+				// Check if this is a base template name that should be substituted with the instantiated name
+				// For example, "Array" should become "Array<int32>" when inside an Array<int32> method
+				for (const auto& [base_name, inst_type]: current_template_bindings_) {
+					// Skip if this is a template parameter binding (like ElementType -> int32)
+					if (base_name.find('<') == std::string::npos && result.name == base_name) {
+						// This is the base template name, substitute with instantiated name
+						SemanticType substituted = inst_type;
+						substituted.is_const = substituted.is_const || result.is_const;
+						substituted.is_nonull = substituted.is_nonull || result.is_nonull;
+						substituted.pointer_depth = std::max(substituted.pointer_depth, result.pointer_depth);
+						substituted.is_reference = substituted.is_reference || result.is_reference;
+						substituted.is_array = substituted.is_array || result.is_array;
+						if (result.is_array && result.array_size != 0) {
+							substituted.array_size = result.array_size;
+						}
+						return substituted;
+					}
 				}
 				return result;
 			}
@@ -1023,7 +1320,8 @@ namespace dino::codegen {
 
 			FunctionInfo* instantiate_template_function(FunctionInfo* function_template, const std::vector<SemanticType>& args) {
 				if (function_template == nullptr ||
-					(function_template->function == nullptr && function_template->method == nullptr) ||
+					(function_template->function == nullptr && function_template->method == nullptr &&
+					 function_template->constructor == nullptr && function_template->destructor == nullptr) ||
 					function_template->template_params.empty()) {
 					return nullptr;
 				}
@@ -1093,6 +1391,8 @@ namespace dino::codegen {
 				instance->owner_unit = function_template->owner_unit;
 				instance->function = function_template->function;
 				instance->method = function_template->method;
+				instance->constructor = function_template->constructor;
+				instance->destructor = function_template->destructor;
 				instance->return_type = substitute_semantic_type(function_template->return_type, bindings);
 				instance->params = concrete_params;
 				instance->param_is_pack = function_template->param_is_pack;
@@ -1103,19 +1403,65 @@ namespace dino::codegen {
 				instance->external_only = function_template->external_only;
 				instance->is_static_method = function_template->is_static_method;
 				instance->is_template_instance = true;
-				instance->llvm_name = instance->kind == FunctionKind::Method ? mangle_method(*instance) : mangle_free_function(*instance);
+				// For template struct methods, update the owner to the instantiated struct name
+				// if the owner is a template struct
+				if (template_structs_.contains(instance->owner)) {
+					// The owner is a template struct - we need to find the instantiated version
+					// The instantiated struct name should be in the form "BaseName<Args>"
+					// We'll need to construct this from the bindings
+					// For now, keep the original owner - the struct instantiation will handle this
+				}
+				if (instance->kind == FunctionKind::Method) {
+					instance->llvm_name = mangle_method(*instance);
+				} else if (instance->kind == FunctionKind::Constructor) {
+					instance->llvm_name = mangle_constructor(*instance);
+				} else if (instance->kind == FunctionKind::Destructor) {
+					instance->llvm_name = mangle_destructor(*instance);
+				} else {
+					instance->llvm_name = mangle_free_function(*instance);
+				}
 
 				FunctionInfo* result = instance.get();
 				owned_functions_.push_back(std::move(instance));
-				if (result->kind == FunctionKind::Method) {
-					structs_[result->owner].methods[result->name].push_back(result);
+				// For template instances, the owner might be the base template name
+				// Check if the owner exists in structs_, if not, check template_structs_
+				const auto owner_it = structs_.find(result->owner);
+				const auto template_it = template_structs_.find(result->owner);
+				// If the owner is not found in either, this might be a template instance
+				// where the owner should be updated to the instantiated struct name
+				// We'll handle this by not adding to the owner's method list here
+				// The struct instantiation code will handle this
+				if (owner_it != structs_.end()) {
+					if (result->kind == FunctionKind::Method) {
+						owner_it->second.methods[result->name].push_back(result);
+					} else if (result->kind == FunctionKind::Constructor) {
+						owner_it->second.constructors.push_back(result);
+					} else if (result->kind == FunctionKind::Destructor) {
+						owner_it->second.destructor = result;
+					} else {
+						free_functions_[result->name].push_back(result);
+					}
+				} else if (template_it != template_structs_.end()) {
+					if (result->kind == FunctionKind::Method) {
+						template_it->second.methods[result->name].push_back(result);
+					} else if (result->kind == FunctionKind::Constructor) {
+						template_it->second.constructors.push_back(result);
+					} else if (result->kind == FunctionKind::Destructor) {
+						template_it->second.destructor = result;
+					} else {
+						free_functions_[result->name].push_back(result);
+					}
 				} else {
+					// Owner not found - this is a template instance method
+					// Don't add to any owner's list; it will be added by the struct instantiation
 					free_functions_[result->name].push_back(result);
 				}
 				template_instances_[key] = result;
 
 				std::vector<llvm::Type*> llvm_params;
-				if (result->kind == FunctionKind::Method && !result->is_static_method) {
+				if ((result->kind == FunctionKind::Method && !result->is_static_method) ||
+					result->kind == FunctionKind::Constructor ||
+					result->kind == FunctionKind::Destructor) {
 					llvm_params.push_back(llvm::PointerType::get(context_, 0));
 				}
 				for (const auto& parameter: result->params) {
@@ -1296,6 +1642,10 @@ namespace dino::codegen {
 			}
 
 			llvm::AllocaInst* create_entry_alloca(llvm::Function* function, llvm::Type* type, const std::string& name) {
+				if (type == nullptr) {
+					errors_.push_back(std::format("Cannot create alloca for null type (name: '{}')", name));
+					return nullptr;
+				}
 				llvm::IRBuilder<> entry_builder(&function->getEntryBlock(), function->getEntryBlock().begin());
 				return entry_builder.CreateAlloca(type, nullptr, name);
 			}
@@ -1384,7 +1734,15 @@ namespace dino::codegen {
 
 			void declare_structs() {
 				for (auto& [name, info]: structs_) {
-					info.llvm_type = llvm::StructType::create(context_, name);
+					if (info.llvm_type == nullptr) {
+						info.llvm_type = llvm::StructType::create(context_, name);
+					}
+				}
+				// Also declare template structs
+				for (auto& [name, info]: template_structs_) {
+					if (info.llvm_type == nullptr) {
+						info.llvm_type = llvm::StructType::create(context_, name);
+					}
 				}
 			}
 
@@ -1479,10 +1837,23 @@ namespace dino::codegen {
 
 			void define_struct_layouts() {
 				for (auto& [name, info]: structs_) {
+					// Skip only template definitions (not instantiations)
+					// Template definitions are stored in template_structs_, instantiations are in structs_
+					if (template_structs_.contains(name)) {
+						continue;
+					}
 					std::vector<llvm::Type*> field_types;
 					field_types.reserve(info.fields.size());
 					for (const auto& field: info.fields) {
-						field_types.push_back(llvm_type(field.type));
+						llvm::Type* field_type = llvm_type(field.type);
+						if (field_type == nullptr) {
+							errors_.push_back(std::format("Failed to get LLVM type for field '{}' in struct '{}'", field.name, name));
+							return;
+						}
+						field_types.push_back(field_type);
+					}
+					if (!info.llvm_type->isOpaque()) {
+						continue; // Already defined
 					}
 					info.llvm_type->setBody(field_types, false);
 				}
@@ -1490,12 +1861,18 @@ namespace dino::codegen {
 
 			void declare_functions() {
 				for (auto& function: owned_functions_) {
-					if (!function->template_params.empty() && !function->is_template_instance) {
+					// Skip template definitions that are not instances
+					// But keep variadic functions (they need to be declared for C linkage)
+					// And keep external-only functions
+					const bool is_member_of_template_definition =
+						!function->owner.empty() && template_structs_.contains(function->owner) && !function->is_template_instance;
+					if ((!function->template_params.empty() && !function->is_template_instance && !function->external_only && !function->variadic) ||
+						is_member_of_template_definition) {
 						continue;
 					}
 					std::vector<llvm::Type*> params;
 					if ((function->kind == FunctionKind::Method && !function->is_static_method) || function->kind == FunctionKind::Conversion ||
-						function->kind == FunctionKind::Destructor) {
+						function->kind == FunctionKind::Destructor || function->kind == FunctionKind::Constructor) {
 						params.push_back(llvm::PointerType::get(context_, 0));
 					}
 					for (const auto& parameter: function->params) {
@@ -1515,38 +1892,104 @@ namespace dino::codegen {
 			}
 
 			void define_functions() {
-				for (size_t i = 0; i < owned_functions_.size(); ++i) {
-					FunctionInfo* function = owned_functions_[i].get();
-					if (function->external_only || function->llvm_function == nullptr || function->is_defined) {
-						continue;
+				for (auto& [name, info]: structs_) {
+					for (FunctionInfo* constructor: info.constructors) {
+						define_constructor(*constructor);
 					}
-					if (function->function != nullptr) {
-						define_free_function(*function);
-					} else if (function->constructor != nullptr) {
-						define_constructor(*function);
-					} else if (function->destructor != nullptr) {
-						define_destructor(*function);
-					} else if (function->method != nullptr) {
-						define_method(*function);
-					} else if (function->conversion != nullptr) {
-						define_conversion(*function);
+					if (info.destructor != nullptr) {
+						define_destructor(*info.destructor);
+					}
+					for (const auto& [method_name, methods]: info.methods) {
+						for (FunctionInfo* method: methods) {
+							define_method(*method);
+						}
+					}
+					for (const auto& [conv_name, conv]: info.conversions) {
+						define_conversion(*conv);
+					}
+				}
+				for (const auto& [name, funcs]: free_functions_) {
+					for (FunctionInfo* func: funcs) {
+						define_free_function(*func);
 					}
 				}
 			}
 
-			void begin_function(FunctionInfo& info) {
-				llvm::BasicBlock* entry = llvm::BasicBlock::Create(context_, "entry", info.llvm_function);
-				builder_.SetInsertPoint(entry);
-				current_function_ = info.llvm_function;
-				scopes_.clear();
-				push_scope();
-				current_yield_ = nullptr;
+			void define_template_struct_functions() {
+				// Define functions for template structs that were instantiated during code generation
+				// These structs were added to structs_ after define_functions() ran
+				// Collect template struct names first to avoid iterator invalidation
+				std::vector<std::string> template_struct_names;
+				for (const auto& [name, info]: structs_) {
+					if (name.find('<') != std::string::npos) {
+						template_struct_names.push_back(name);
+					}
+				}
+				for (const std::string& name: template_struct_names) {
+					auto it = structs_.find(name);
+					if (it == structs_.end()) {
+						continue;
+					}
+					StructInfo& info = it->second;
+					for (FunctionInfo* constructor: info.constructors) {
+						if (!constructor->is_defined && !constructor->is_defining) {
+							define_constructor(*constructor);
+						}
+					}
+					if (info.destructor != nullptr && !info.destructor->is_defined && !info.destructor->is_defining) {
+						define_destructor(*info.destructor);
+					}
+					for (const auto& [method_name, methods]: info.methods) {
+						for (FunctionInfo* method: methods) {
+							if (!method->is_defined && !method->is_defining) {
+								define_method(*method);
+							}
+						}
+					}
+				}
+			}
+
+			void define_template_function_instances() {
+				// Define all template function instances that were created during code generation
+				// These are functions that were instantiated via instantiate_template_function
+				// but not yet defined
+				// Use a while loop to handle cases where defining one function instantiates another
+				bool changed = true;
+				int iterations = 0;
+				const int max_iterations = 100;
+				while (changed && iterations < max_iterations) {
+					changed = false;
+					std::vector<FunctionInfo*> to_define;
+					for (const auto& func: owned_functions_) {
+						if (func->is_template_instance && !func->is_defined && !func->is_defining && !func->external_only) {
+							to_define.push_back(func.get());
+						}
+					}
+					for (FunctionInfo* func: to_define) {
+						if (func->is_defined || func->is_defining) {
+							continue;
+						}
+						changed = true;
+						if (func->kind == FunctionKind::Method) {
+							define_method(*func);
+						} else if (func->kind == FunctionKind::Constructor) {
+							define_constructor(*func);
+						} else if (func->kind == FunctionKind::Destructor) {
+							define_destructor(*func);
+						}
+					}
+					iterations++;
+				}
+				if (iterations >= max_iterations) {
+					errors_.push_back("Too many template function instantiation iterations - possible infinite loop");
+				}
 			}
 
 			void finish_function(FunctionInfo& info) {
 				if (builder_.GetInsertBlock() != nullptr && builder_.GetInsertBlock()->getTerminator() == nullptr) {
 					if (info.kind == FunctionKind::Constructor) {
-						// Constructors always return the fully initialized value.
+						// Constructors return void (they modify struct in-place via this pointer)
+						builder_.CreateRetVoid();
 					} else if (info.return_type.is_void()) {
 						builder_.CreateRetVoid();
 					} else {
@@ -1569,7 +2012,14 @@ namespace dino::codegen {
 				for (size_t i = 0; i < names.size(); ++i) {
 					llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(i + start_index));
 					arg->setName(names[i]);
-					llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(parameters[i], true), names[i]);
+					llvm::Type* param_llvm_type = llvm_type(parameters[i], true);
+					if (param_llvm_type == nullptr) {
+						continue;
+					}
+					llvm::AllocaInst* slot = create_entry_alloca(current_function_, param_llvm_type, names[i]);
+					if (slot == nullptr) {
+						continue;
+					}
 					builder_.CreateStore(arg, slot);
 					declare_variable(names[i], VariableInfo{parameters[i], slot, false});
 				}
@@ -1615,7 +2065,17 @@ namespace dino::codegen {
 							llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(arg_index + start_index));
 							const std::string hidden_name = std::format("{}${}", parameter.name, pack.size());
 							arg->setName(hidden_name);
-							llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(info.params[arg_index], true), hidden_name);
+							llvm::Type* param_type = llvm_type(info.params[arg_index], true);
+							if (param_type == nullptr) {
+								errors_.push_back(std::format("Failed to get LLVM type for parameter '{}' in template instance", hidden_name));
+								++arg_index;
+								continue;
+							}
+							llvm::AllocaInst* slot = create_entry_alloca(current_function_, param_type, hidden_name);
+							if (slot == nullptr) {
+								++arg_index;
+								continue;
+							}
 							builder_.CreateStore(arg, slot);
 							pack.push_back(PackElementInfo{info.params[arg_index], slot});
 							++arg_index;
@@ -1625,14 +2085,34 @@ namespace dino::codegen {
 					}
 					llvm::Argument* arg = current_function_->getArg(static_cast<unsigned>(arg_index + start_index));
 					arg->setName(parameter.name);
-					llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(info.params[arg_index], true), parameter.name);
+					llvm::Type* param_type = llvm_type(info.params[arg_index], true);
+					if (param_type == nullptr) {
+						errors_.push_back(std::format("Failed to get LLVM type for parameter '{}' in template instance", parameter.name));
+						++arg_index;
+						continue;
+					}
+					llvm::AllocaInst* slot = create_entry_alloca(current_function_, param_type, parameter.name);
+					if (slot == nullptr) {
+						++arg_index;
+						continue;
+					}
 					builder_.CreateStore(arg, slot);
 					declare_variable(parameter.name, VariableInfo{info.params[arg_index], slot, false});
 					++arg_index;
 				}
 			}
 
+			void begin_function(FunctionInfo& info) {
+				current_function_ = info.llvm_function;
+				llvm::BasicBlock* entry = llvm::BasicBlock::Create(context_, "entry", current_function_);
+				builder_.SetInsertPoint(entry);
+			}
+
 			void define_free_function(FunctionInfo& info) {
+				// Skip external-only functions
+				if (info.external_only) {
+					return;
+				}
 				if (info.is_defined || info.is_defining) {
 					return;
 				}
@@ -1656,29 +2136,106 @@ namespace dino::codegen {
 			}
 
 			void define_constructor(FunctionInfo& info) {
-				const StructInfo& owner = structs_.at(info.owner);
+				// Skip external-only functions
+				if (info.external_only) {
+						return;
+				}
+				if (info.is_defined || info.is_defining) {
+						return;
+				}
+				info.is_defining = true;
+				const auto it = structs_.find(info.owner);
+				const auto template_it = template_structs_.find(info.owner);
+				if (it == structs_.end() && template_it == template_structs_.end()) {
+					errors_.push_back(std::format("Cannot find owner struct '{}' for constructor", info.owner));
+					return;
+				}
+				const StructInfo& owner = (it != structs_.end()) ? it->second : template_it->second;
 				begin_function(info);
 				current_unit_ = info.owner_unit;
-				llvm::AllocaInst* self_slot = create_entry_alloca(current_function_, owner.llvm_type, "this.storage");
-				current_self_ = self_slot;
+				// Use the first argument as the this pointer (struct to initialize in-place)
+				llvm::Argument* this_arg = current_function_->getArg(0);
+				this_arg->setName("this");
+				current_self_ = this_arg;
 				current_struct_ = &owner;
-				declare_variable("this", VariableInfo{SemanticType{info.owner, false, false, true}, self_slot, false});
+				declare_variable("this", VariableInfo{SemanticType{info.owner, false, false, true}, this_arg, false});
 
-				std::vector<std::string> names;
-				names.reserve(info.constructor->parameters.size());
-				for (const auto& parameter: info.constructor->parameters) {
-					names.push_back(parameter.name);
+				// For template instances, we need to set up template bindings
+				if (info.is_template_instance) {
+					// Parse the instantiated type name to extract template arguments
+					size_t lt_pos = info.owner.find('<');
+					size_t gt_pos = info.owner.rfind('>');
+					if (lt_pos != std::string::npos && gt_pos != std::string::npos && gt_pos > lt_pos) {
+						std::string base_name = info.owner.substr(0, lt_pos);
+						std::string args_str = info.owner.substr(lt_pos + 1, gt_pos - lt_pos - 1);
+						// Find the base template struct
+						const auto base_it = template_structs_.find(base_name);
+						if (base_it != template_structs_.end() && base_it->second.decl != nullptr) {
+							// Set up template bindings
+							std::unordered_map<std::string, SemanticType> bindings;
+							// Add binding for base template name to instantiated name
+							bindings[base_name] = SemanticType{info.owner, false, false, false};
+							const auto& template_params = base_it->second.decl->template_params;
+							// Parse arguments (simple comma-separated for now)
+							size_t start = 0;
+							size_t comma_pos = 0;
+							size_t param_idx = 0;
+							while (comma_pos != std::string::npos && param_idx < template_params.size()) {
+								comma_pos = args_str.find(',', start);
+								std::string arg_str = (comma_pos == std::string::npos) 
+									? args_str.substr(start) 
+									: args_str.substr(start, comma_pos - start);
+								// Trim whitespace
+								size_t first_non_space = arg_str.find_first_not_of(" \t");
+								size_t last_non_space = arg_str.find_last_not_of(" \t");
+								if (first_non_space != std::string::npos) {
+									arg_str = arg_str.substr(first_non_space, last_non_space - first_non_space + 1);
+								}
+								// Create SemanticType from the argument string
+								SemanticType arg_type = from_typeref_string(arg_str);
+								bindings[template_params[param_idx].name] = arg_type;
+								start = comma_pos + 1;
+								param_idx++;
+							}
+							current_template_bindings_ = bindings;
+						}
+					}
 				}
-				bind_parameters(info.params, names);
+
+				if (info.is_template_instance && !info.template_params.empty() && info.constructor != nullptr) {
+						bind_template_instance_parameters(info.constructor->parameters, info, 1);
+				} else {
+						std::vector<std::string> names;
+					names.reserve(info.constructor->parameters.size());
+					for (const auto& parameter: info.constructor->parameters) {
+						names.push_back(parameter.name);
+					}
+					// Skip first argument (this pointer) when binding parameters
+					bind_parameters(info.params, names, 1);
+				}
 				emit_statement(info.constructor->body.get());
-				if (builder_.GetInsertBlock() != nullptr && builder_.GetInsertBlock()->getTerminator() == nullptr) {
-					builder_.CreateRet(builder_.CreateLoad(owner.llvm_type, self_slot, "ctor.ret"));
-				}
+				current_template_bindings_.clear();
 				finish_function(info);
+				info.is_defining = false;
+				info.is_defined = true;
 			}
 
 			void define_destructor(FunctionInfo& info) {
-				const StructInfo& owner = structs_.at(info.owner);
+				// Skip external-only functions
+				if (info.external_only) {
+					return;
+				}
+				if (info.is_defined || info.is_defining) {
+					return;
+				}
+				info.is_defining = true;
+				const auto it = structs_.find(info.owner);
+				const auto template_it = template_structs_.find(info.owner);
+				if (it == structs_.end() && template_it == template_structs_.end()) {
+					errors_.push_back(std::format("Cannot find owner struct '{}' for destructor", info.owner));
+					return;
+				}
+				const StructInfo& owner = (it != structs_.end()) ? it->second : template_it->second;
 				begin_function(info);
 				current_unit_ = info.owner_unit;
 				llvm::Argument* this_arg = current_function_->getArg(0);
@@ -1686,12 +2243,77 @@ namespace dino::codegen {
 				current_self_ = this_arg;
 				current_struct_ = &owner;
 				declare_variable("this", VariableInfo{SemanticType{info.owner, false, false, true}, this_arg, false});
+
+				// For template instances, we need to set up template bindings
+				if (info.is_template_instance) {
+					// Parse the instantiated type name to extract template arguments
+					size_t lt_pos = info.owner.find('<');
+					size_t gt_pos = info.owner.rfind('>');
+					if (lt_pos != std::string::npos && gt_pos != std::string::npos && gt_pos > lt_pos) {
+						std::string base_name = info.owner.substr(0, lt_pos);
+						std::string args_str = info.owner.substr(lt_pos + 1, gt_pos - lt_pos - 1);
+						// Find the base template struct
+						const auto base_it = template_structs_.find(base_name);
+						if (base_it != template_structs_.end() && base_it->second.decl != nullptr) {
+							// Set up template bindings
+							std::unordered_map<std::string, SemanticType> bindings;
+							// Add binding for base template name to instantiated name
+							bindings[base_name] = SemanticType{info.owner, false, false, false};
+							const auto& template_params = base_it->second.decl->template_params;
+							// Parse arguments (simple comma-separated for now)
+							size_t start = 0;
+							size_t comma_pos = 0;
+							size_t param_idx = 0;
+							while (comma_pos != std::string::npos && param_idx < template_params.size()) {
+								comma_pos = args_str.find(',', start);
+								std::string arg_str = (comma_pos == std::string::npos) 
+									? args_str.substr(start) 
+									: args_str.substr(start, comma_pos - start);
+								// Trim whitespace
+								size_t first_non_space = arg_str.find_first_not_of(" \t");
+								size_t last_non_space = arg_str.find_last_not_of(" \t");
+								if (first_non_space != std::string::npos) {
+									arg_str = arg_str.substr(first_non_space, last_non_space - first_non_space + 1);
+								}
+								// Create SemanticType from the argument string
+								SemanticType arg_type = from_typeref_string(arg_str);
+								bindings[template_params[param_idx].name] = arg_type;
+								start = comma_pos + 1;
+								param_idx++;
+							}
+							current_template_bindings_ = bindings;
+						}
+					}
+				}
+
 				emit_statement(info.destructor->body.get());
+				current_template_bindings_.clear();
 				finish_function(info);
+				info.is_defining = false;
+				info.is_defined = true;
 			}
 
 			void define_method(FunctionInfo& info) {
-				const StructInfo& owner = structs_.at(info.owner);
+				// Skip template definitions that are not instances
+				// Also skip external-only functions (they're just declarations)
+				if (!info.template_params.empty() && !info.is_template_instance && !info.external_only) {
+					return;
+				}
+				// Skip external-only functions (they're just declarations for C linkage)
+				if (info.external_only) {
+					return;
+				}
+				if (info.is_defined || info.is_defining) {
+					return;
+				}
+				info.is_defining = true;
+				const auto it = structs_.find(info.owner);
+				const auto template_it = template_structs_.find(info.owner);
+				if (it == structs_.end() && template_it == template_structs_.end()) {
+					errors_.push_back(std::format("Cannot find owner struct '{}' for method", info.owner));
+					return;
+				}
+				const StructInfo& owner = (it != structs_.end()) ? it->second : template_it->second;
 				begin_function(info);
 				current_unit_ = info.owner_unit;
 				current_struct_ = &owner;
@@ -1700,6 +2322,48 @@ namespace dino::codegen {
 					this_arg->setName("this");
 					current_self_ = this_arg;
 					declare_variable("this", VariableInfo{SemanticType{info.owner, false, false, true}, this_arg, false});
+				}
+
+				// For template instances, we need to set up template bindings
+				if (info.is_template_instance) {
+					// Parse the instantiated type name to extract template arguments
+					size_t lt_pos = info.owner.find('<');
+					size_t gt_pos = info.owner.rfind('>');
+					if (lt_pos != std::string::npos && gt_pos != std::string::npos && gt_pos > lt_pos) {
+						std::string base_name = info.owner.substr(0, lt_pos);
+						std::string args_str = info.owner.substr(lt_pos + 1, gt_pos - lt_pos - 1);
+						// Find the base template struct
+						const auto base_it = template_structs_.find(base_name);
+						if (base_it != template_structs_.end() && base_it->second.decl != nullptr) {
+							// Set up template bindings
+							std::unordered_map<std::string, SemanticType> bindings;
+							// Add binding for base template name to instantiated name
+							bindings[base_name] = SemanticType{info.owner, false, false, false};
+							const auto& template_params = base_it->second.decl->template_params;
+							// Parse arguments (simple comma-separated for now)
+							size_t start = 0;
+							size_t comma_pos = 0;
+							size_t param_idx = 0;
+							while (comma_pos != std::string::npos && param_idx < template_params.size()) {
+								comma_pos = args_str.find(',', start);
+								std::string arg_str = (comma_pos == std::string::npos) 
+									? args_str.substr(start) 
+									: args_str.substr(start, comma_pos - start);
+								// Trim whitespace
+								size_t first_non_space = arg_str.find_first_not_of(" \t");
+								size_t last_non_space = arg_str.find_last_not_of(" \t");
+								if (first_non_space != std::string::npos) {
+									arg_str = arg_str.substr(first_non_space, last_non_space - first_non_space + 1);
+								}
+								// Create SemanticType from the argument string
+								SemanticType arg_type = from_typeref_string(arg_str);
+								bindings[template_params[param_idx].name] = arg_type;
+								start = comma_pos + 1;
+								param_idx++;
+							}
+							current_template_bindings_ = bindings;
+						}
+					}
 				}
 
 				if (info.is_template_instance && info.method != nullptr) {
@@ -1713,11 +2377,24 @@ namespace dino::codegen {
 					bind_parameters(info.params, names, info.is_static_method ? 0 : 1);
 				}
 				emit_statement(info.method->body.get());
+				current_template_bindings_.clear();
 				finish_function(info);
+				info.is_defining = false;
+				info.is_defined = true;
 			}
 
 			void define_conversion(FunctionInfo& info) {
-				const StructInfo& owner = structs_.at(info.owner);
+				// Skip external-only functions
+				if (info.external_only) {
+					return;
+				}
+				const auto it = structs_.find(info.owner);
+				const auto template_it = template_structs_.find(info.owner);
+				if (it == structs_.end() && template_it == template_structs_.end()) {
+					errors_.push_back(std::format("Cannot find owner struct '{}' for conversion", info.owner));
+					return;
+				}
+				const StructInfo& owner = (it != structs_.end()) ? it->second : template_it->second;
 				begin_function(info);
 				current_unit_ = info.owner_unit;
 				llvm::Argument* this_arg = current_function_->getArg(0);
@@ -1799,7 +2476,16 @@ namespace dino::codegen {
 				}
 				if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(expr)) {
 					if (identifier->name == "this" && current_struct_ != nullptr && current_self_ != nullptr) {
-						SemanticType self_type{current_struct_->decl->name};
+						// Use the actual struct name from structs_ if this is a template instance
+						std::string struct_name = current_struct_->decl->name;
+						// Check if this is a template instance by looking for the struct in structs_
+						for (const auto& [name, info] : structs_) {
+							if (&info == current_struct_) {
+								struct_name = name;
+								break;
+							}
+						}
+						SemanticType self_type{struct_name};
 						self_type.pointer_depth = 1;
 						return self_type;
 					}
@@ -1886,15 +2572,15 @@ namespace dino::codegen {
 						return SemanticType{"<error>", false, false, false, false, false, 0, true};
 					}
 					SemanticType object_type = infer_expr_type(member->object.get());
-					if (member->via_arrow) {
-						object_type.pointer_depth = 0;
-						object_type.is_reference = false;
-					}
+					// Always zero pointer_depth before looking up struct - MemberExpr accesses the struct itself
+					object_type.pointer_depth = 0;
+					object_type.is_reference = false;
 					object_type.is_array = false;
 					object_type.array_size = 0;
-					if (const auto found = structs_.find(object_type.name); found != structs_.end()) {
+						if (const auto found = structs_.find(object_type.name); found != structs_.end()) {
 						if (const FieldInfo* field = lookup_field(found->second, member->member)) {
-							return field->type;
+							// Substitute template parameters in field type
+							return substitute_semantic_type(field->type, current_template_bindings_);
 						}
 						if (const auto methods = found->second.methods.find(member->member); methods != found->second.methods.end() &&
 																							 !methods->second.empty()) {
@@ -1910,7 +2596,8 @@ namespace dino::codegen {
 					return from_typeref(cast->target_type);
 				}
 				if (const auto* alloc = dynamic_cast<const NewExpr*>(expr)) {
-					SemanticType type = from_typeref(alloc->target_type);
+					// Use substitute_typeref to handle template parameter substitution
+					SemanticType type = substitute_typeref(alloc->target_type);
 					type.pointer_depth = 1;
 					return type;
 				}
@@ -1920,6 +2607,10 @@ namespace dino::codegen {
 				if (const auto* call = dynamic_cast<const CallExpr*>(expr)) {
 					CallResolution resolution = resolve_call(call);
 					if (resolution.function != nullptr) {
+						// Constructor expressions evaluate to constructed values.
+						if (resolution.function->kind == FunctionKind::Constructor) {
+							return SemanticType{resolution.function->owner};
+						}
 						return resolution.function->return_type;
 					}
 				}
@@ -2006,10 +2697,11 @@ namespace dino::codegen {
 
 			llvm::Value* load_variable(const VariableInfo& variable, const std::string& name) {
 				if (variable.type.is_array) {
-					llvm::Type* array_type = llvm_type(variable.type);
+						llvm::Type* array_type = llvm_type(variable.type);
 					return builder_.CreateInBoundsGEP(array_type, variable.address, {builder_.getInt32(0), builder_.getInt32(0)}, name + ".decay");
 				}
-				return builder_.CreateLoad(llvm_type(variable.type), variable.address, name);
+				llvm::Type* ty = llvm_type(variable.type);
+				return builder_.CreateLoad(ty, variable.address, name);
 			}
 
 			llvm::Value* emit_lvalue(const Expr* expr) {
@@ -2057,8 +2749,6 @@ namespace dino::codegen {
 					llvm::Value* base_address = nullptr;
 					if (member->via_arrow) {
 						base_address = emit_expression(member->object.get());
-						object_type.pointer_depth = 0;
-						object_type.is_reference = false;
 					} else {
 						base_address = emit_lvalue(member->object.get());
 					}
@@ -2066,17 +2756,25 @@ namespace dino::codegen {
 						errors_.push_back(std::format("Cannot take address of member '{}'", member->member));
 						return nullptr;
 					}
+					// Always zero pointer_depth before looking up struct - MemberExpr accesses the struct itself
+					object_type.pointer_depth = 0;
+					object_type.is_reference = false;
+					object_type.is_array = false;
+					object_type.array_size = 0;
+					// Check both structs_ and template_structs_ for the struct type
 					const auto found = structs_.find(object_type.name);
-					if (found == structs_.end()) {
+					const auto template_found = template_structs_.find(object_type.name);
+					if (found == structs_.end() && template_found == template_structs_.end()) {
 						errors_.push_back(std::format("Unknown struct type '{}'", object_type.name));
 						return nullptr;
 					}
-					const FieldInfo* field = lookup_field(found->second, member->member);
+					const StructInfo& struct_info = (found != structs_.end()) ? found->second : template_found->second;
+					const FieldInfo* field = lookup_field(struct_info, member->member);
 					if (field == nullptr) {
 						errors_.push_back(std::format("Struct '{}' has no field '{}'", object_type.name, member->member));
 						return nullptr;
 					}
-					return builder_.CreateStructGEP(found->second.llvm_type, base_address, field->index, member->member + ".addr");
+					return builder_.CreateStructGEP(struct_info.llvm_type, base_address, field->index, member->member + ".addr");
 				}
 				if (const auto* index = dynamic_cast<const IndexExpr*>(expr)) {
 					SemanticType object_type = infer_expr_type(index->object.get());
@@ -2118,13 +2816,13 @@ namespace dino::codegen {
 					return emit_literal(*literal);
 				}
 				if (const auto* identifier = dynamic_cast<const IdentifierExpr*>(expr)) {
-					if (identifier->name == "this" && current_self_ != nullptr) {
-						return current_self_;
+						if (identifier->name == "this" && current_self_ != nullptr) {
+								return current_self_;
 					}
 					if (const VariableInfo* variable = lookup_variable(identifier->name)) {
-						return load_variable(*variable, identifier->name);
+								return load_variable(*variable, identifier->name);
 					}
-					if (const auto global = globals_.find(identifier->name); global != globals_.end()) {
+						if (const auto global = globals_.find(identifier->name); global != globals_.end()) {
 						return load_variable(VariableInfo{global->second.type, global->second.global, false}, identifier->name);
 					}
 					if (current_struct_ != nullptr) {
@@ -2254,13 +2952,56 @@ namespace dino::codegen {
 				llvm::Value* rhs = emit_expression(binary.rhs.get());
 				SemanticType lhs_type = infer_expr_type(binary.lhs.get());
 				SemanticType rhs_type = infer_expr_type(binary.rhs.get());
-				if (lhs == nullptr || rhs == nullptr) {
-					return nullptr;
+				
+				// Handle pointer arithmetic: pointer + integer
+				if (binary.op == "+" || binary.op == "-") {
+					if (lhs_type.pointer_depth > 0 && is_numeric_type(rhs_type)) {
+						llvm::Value* ptr = emit_expression(binary.lhs.get());
+						llvm::Value* offset = emit_expression(binary.rhs.get());
+						if (ptr == nullptr || offset == nullptr) {
+							return nullptr;
+						}
+						// Cast offset to i64 for GEP
+						if (!offset->getType()->isIntegerTy(64)) {
+							offset = builder_.CreateIntCast(offset, llvm::Type::getInt64Ty(context_), false, "offset.cast");
+						}
+						// Get element type of the pointer
+						SemanticType element_type = lhs_type;
+						element_type.pointer_depth--;
+						llvm::Type* llvm_element_type = llvm_type(element_type);
+						// Use GEP for pointer arithmetic
+						if (binary.op == "+") {
+							return builder_.CreateInBoundsGEP(llvm_element_type, ptr, offset, "ptr.add");
+						} else {
+							// Subtract: ptr - offset = ptr + (-offset)
+							llvm::Value* neg_offset = builder_.CreateNeg(offset, "neg.offset");
+							return builder_.CreateInBoundsGEP(llvm_element_type, ptr, neg_offset, "ptr.sub");
+						}
+					}
+					if (rhs_type.pointer_depth > 0 && is_numeric_type(lhs_type) && binary.op == "+") {
+						// integer + pointer (commutative)
+						llvm::Value* ptr = emit_expression(binary.rhs.get());
+						llvm::Value* offset = emit_expression(binary.lhs.get());
+						if (ptr == nullptr || offset == nullptr) {
+							return nullptr;
+						}
+						if (!offset->getType()->isIntegerTy(64)) {
+							offset = builder_.CreateIntCast(offset, llvm::Type::getInt64Ty(context_), false, "offset.cast");
+						}
+						SemanticType element_type = rhs_type;
+						element_type.pointer_depth--;
+						llvm::Type* llvm_element_type = llvm_type(element_type);
+						return builder_.CreateInBoundsGEP(llvm_element_type, ptr, offset, "ptr.add");
+					}
 				}
+				
 				if (is_numeric_type(lhs_type) && is_numeric_type(rhs_type)) {
 					SemanticType common = numeric_common_type(lhs_type, rhs_type);
-					lhs = cast_value(lhs, lhs_type, common, true);
-					rhs = cast_value(rhs, rhs_type, common, true);
+					llvm::Value* lhs = cast_value(emit_expression(binary.lhs.get()), lhs_type, common, false);
+					llvm::Value* rhs = cast_value(emit_expression(binary.rhs.get()), rhs_type, common, false);
+					if (lhs == nullptr || rhs == nullptr) {
+						return nullptr;
+					}
 					if (binary.op == "+") {
 						return is_float_type(common) ? builder_.CreateFAdd(lhs, rhs, "add") : builder_.CreateAdd(lhs, rhs, "add");
 					}
@@ -2546,7 +3287,8 @@ namespace dino::codegen {
 			}
 
 			llvm::Value* emit_new_expression(const NewExpr& expr) {
-				SemanticType allocated_type = from_typeref(expr.target_type);
+				// Use substitute_typeref to handle template parameter substitution
+				SemanticType allocated_type = substitute_typeref(expr.target_type);
 				llvm::Value* element_count = expr.is_array ? emit_expression(expr.array_size.get())
 														   : llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), 1);
 				if (element_count == nullptr) {
@@ -2662,6 +3404,30 @@ namespace dino::codegen {
 			llvm::Value* cast_value(llvm::Value* value, const SemanticType& from, const SemanticType& to, bool implicit) {
 				if (value == nullptr || same_type(from, to)) {
 					return value;
+				}
+				// Handle casting from base template type to instantiated template type
+				// e.g., Array -> Array<int32> (this should be a no-op if they're the same underlying type)
+				if (!from.name.empty() && !to.name.empty()) {
+					// Check if from is a base template and to is an instantiation of it
+					size_t to_lt = to.name.find('<');
+					if (to_lt != std::string::npos) {
+						std::string to_base = to.name.substr(0, to_lt);
+						if (from.name == to_base) {
+							// This is a cast from base template to its instantiation
+							// They should have the same LLVM type, so just return the value
+							return value;
+						}
+					}
+					// Check if to is a base template and from is an instantiation of it
+					size_t from_lt = from.name.find('<');
+					if (from_lt != std::string::npos) {
+						std::string from_base = from.name.substr(0, from_lt);
+						if (to.name == from_base) {
+							// This is a cast from instantiation to base template
+							// They should have the same LLVM type, so just return the value
+							return value;
+						}
+					}
 				}
 				if (is_numeric_type(from) && is_numeric_type(to)) {
 					if (is_float_type(from) && is_float_type(to)) {
@@ -2987,6 +3753,7 @@ namespace dino::codegen {
 				}
 
 				std::vector<llvm::Value*> args;
+				llvm::Value* constructor_self_slot = nullptr;
 				if ((resolution.function->kind == FunctionKind::Method && !resolution.function->is_static_method) ||
 					resolution.function->kind == FunctionKind::Conversion) {
 					if (resolution.object_address == nullptr) {
@@ -2994,6 +3761,11 @@ namespace dino::codegen {
 						return nullptr;
 					}
 					args.push_back(resolution.object_address);
+				} else if (resolution.function->kind == FunctionKind::Constructor) {
+					// Constructor expressions produce values. Initialize a temporary object and load it.
+					llvm::Type* struct_type = llvm_type(SemanticType{resolution.function->owner});
+					constructor_self_slot = create_entry_alloca(current_function_, struct_type, "ctor.tmp");
+					args.push_back(constructor_self_slot);
 				}
 
 				const std::vector<ExpandedCallArgument> expanded_args = expanded_call_args(call);
@@ -3012,6 +3784,13 @@ namespace dino::codegen {
 					args.push_back(value);
 				}
 
+				if (resolution.function->kind == FunctionKind::Constructor) {
+					// Constructors return void and initialize the passed object in-place.
+					// The expression result is the initialized value.
+					builder_.CreateCall(resolution.function->llvm_function, args);
+					llvm::Type* struct_type = llvm_type(SemanticType{resolution.function->owner});
+					return builder_.CreateLoad(struct_type, constructor_self_slot, "ctor.value");
+				}
 				if (resolution.function->return_type.is_void()) {
 					builder_.CreateCall(resolution.function->llvm_function, args);
 					return nullptr;
@@ -3019,11 +3798,11 @@ namespace dino::codegen {
 				return builder_.CreateCall(resolution.function->llvm_function, args, "call");
 			}
 
-			void emit_statement(const Stmt* statement) {
-				if (statement == nullptr || builder_.GetInsertBlock()->getTerminator() != nullptr) {
+			void emit_statement(const Stmt* stmt) {
+				if (stmt == nullptr) {
 					return;
 				}
-				if (const auto* block = dynamic_cast<const BlockStmt*>(statement)) {
+				if (const auto* block = dynamic_cast<const BlockStmt*>(stmt)) {
 					push_scope();
 					for (const auto& nested: block->statements) {
 						emit_statement(nested.get());
@@ -3034,42 +3813,42 @@ namespace dino::codegen {
 					pop_scope();
 					return;
 				}
-				if (const auto* expression = dynamic_cast<const ExprStmt*>(statement)) {
+				if (const auto* expression = dynamic_cast<const ExprStmt*>(stmt)) {
 					emit_expression(expression->expr.get());
 					return;
 				}
-				if (const auto* variable = dynamic_cast<const VarDeclStmt*>(statement)) {
+				if (const auto* variable = dynamic_cast<const VarDeclStmt*>(stmt)) {
 					emit_var_decl(*variable);
 					return;
 				}
-				if (const auto* return_stmt = dynamic_cast<const ReturnStmt*>(statement)) {
+				if (const auto* return_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
 					emit_return(*return_stmt);
 					return;
 				}
-				if (const auto* yield_stmt = dynamic_cast<const YieldStmt*>(statement)) {
+				if (const auto* yield_stmt = dynamic_cast<const YieldStmt*>(stmt)) {
 					emit_yield(*yield_stmt);
 					return;
 				}
-				if (const auto* delete_stmt = dynamic_cast<const DeleteStmt*>(statement)) {
+				if (const auto* delete_stmt = dynamic_cast<const DeleteStmt*>(stmt)) {
 					emit_delete(*delete_stmt);
 					return;
 				}
-				if (const auto* if_stmt = dynamic_cast<const IfStmt*>(statement)) {
+				if (const auto* if_stmt = dynamic_cast<const IfStmt*>(stmt)) {
 					emit_if_statement(*if_stmt);
 					return;
 				}
-				if (const auto* while_stmt = dynamic_cast<const WhileStmt*>(statement)) {
+				if (const auto* while_stmt = dynamic_cast<const WhileStmt*>(stmt)) {
 					emit_while_statement(*while_stmt);
 					return;
 				}
-				if (const auto* for_stmt = dynamic_cast<const ForStmt*>(statement)) {
+				if (const auto* for_stmt = dynamic_cast<const ForStmt*>(stmt)) {
 					emit_for_statement(*for_stmt);
 					return;
 				}
-				if (dynamic_cast<const FallthroughStmt*>(statement) != nullptr) {
+				if (dynamic_cast<const FallthroughStmt*>(stmt) != nullptr) {
 					return;
 				}
-				errors_.push_back(std::format("Unsupported statement kind '{}'", statement->kind()));
+				errors_.push_back(std::format("Unsupported statement kind '{}'", stmt->kind()));
 			}
 
 			void emit_var_decl(const VarDeclStmt& variable) {
@@ -3140,7 +3919,8 @@ namespace dino::codegen {
 				}
 
 				llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(type), variable.name);
-				declare_variable(variable.name, VariableInfo{type, slot, type_has_destructor(type)});
+				bool needs_destructor = type_has_destructor(type);
+				declare_variable(variable.name, VariableInfo{type, slot, needs_destructor});
 				if (variable.init) {
 					llvm::Value* init_value = emit_expression(variable.init.get());
 					SemanticType init_type = infer_expr_type(variable.init.get());
