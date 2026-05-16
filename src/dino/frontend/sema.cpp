@@ -58,6 +58,7 @@ namespace dino::frontend {
 
 		struct StructInfo {
 			std::string name;
+			std::vector<TemplateParam> template_params;
 			std::unordered_map<std::string, FieldInfo> fields;
 			std::unordered_map<std::string, FieldInfo> static_fields;
 			std::unordered_map<std::string, std::vector<FunctionSig>> methods;
@@ -285,6 +286,27 @@ namespace dino::frontend {
 				return name;
 			}
 
+			[[nodiscard]] static std::vector<std::string> extract_template_args(const std::string& name) {
+				std::vector<std::string> args;
+				const size_t lt_pos = name.find('<');
+				const size_t gt_pos = name.rfind('>');
+				if (lt_pos == std::string::npos || gt_pos == std::string::npos || gt_pos <= lt_pos) {
+					return args;
+				}
+				std::string args_str = name.substr(lt_pos + 1, gt_pos - lt_pos - 1);
+				size_t start = 0;
+				while (start < args_str.size()) {
+					size_t comma_pos = args_str.find(',', start);
+					if (comma_pos == std::string::npos) {
+						args.push_back(args_str.substr(start));
+						break;
+					}
+					args.push_back(args_str.substr(start, comma_pos - start));
+					start = comma_pos + 1;
+				}
+				return args;
+			}
+
 			[[nodiscard]] const StructInfo* find_struct_info(const std::string& name) const {
 				if (const auto it = structs_.find(name); it != structs_.end()) {
 					return &it->second;
@@ -475,6 +497,7 @@ namespace dino::frontend {
 							}
 							// Store template structs separately
 							if (!st->template_params.empty()) {
+								info.template_params = st->template_params;
 								template_structs_[st->name] = std::move(info);
 							} else {
 								structs_[st->name] = std::move(info);
@@ -1489,7 +1512,34 @@ namespace dino::frontend {
 
 						const auto field = struct_info->fields.find(e->member);
 						if (field != struct_info->fields.end()) {
-						return field->second.type;
+						SemanticType field_type = field->second.type;
+						
+						// Substitute template parameters if this is a template instantiation
+						if (!struct_info->template_params.empty()) {
+							std::vector<std::string> template_args = extract_template_args(base.name);
+							if (!template_args.empty() && template_args.size() == struct_info->template_params.size()) {
+								std::unordered_map<std::string, SemanticType> substitutions;
+								for (size_t i = 0; i < struct_info->template_params.size(); ++i) {
+									SemanticType arg_type;
+									arg_type.name = template_args[i];
+									substitutions[struct_info->template_params[i].name] = arg_type;
+								}
+								
+								// Substitute template parameter in field type
+								const auto it = substitutions.find(field_type.name);
+								if (it != substitutions.end()) {
+									SemanticType substituted = it->second;
+									substituted.pointer_depth = field_type.pointer_depth;
+									substituted.is_reference = field_type.is_reference;
+									substituted.is_array = field_type.is_array;
+									substituted.is_const = field_type.is_const;
+									substituted.is_nonull = field_type.is_nonull;
+									field_type = substituted;
+								}
+							}
+						}
+						
+						return field_type;
 					}
 
 						const auto method = struct_info->methods.find(e->member);
