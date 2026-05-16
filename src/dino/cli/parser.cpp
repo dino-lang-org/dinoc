@@ -7,13 +7,7 @@
 namespace dino::cli {
 	namespace {
 
-		void print_help() {
-			std::cout << "Usage: dinoc <command> [options]\n\n"
-						 "Commands:\n"
-						 "  compile <source.dino>  Compile source file to object file\n"
-						 "  link <obj1.o> ...      Link object files into executable or library\n"
-						 "  --help, -h             Show this help message\n\n"
-						 "Compile options:\n"
+		constexpr auto compile_options = "Compile options:\n"
 						 "  -o <file>              Output object file (default: source_name.o)\n"
 						 "  -I <path>              Add include search path\n"
 						 "  --target-os <os>       Target OS (windows, linux, macos)\n"
@@ -24,13 +18,24 @@ namespace dino::cli {
 						 "  --dump-ast             Print AST to stdout\n"
 						 "  --ast-out <file>       Write AST to file\n"
 						 "  --dump-llvm            Print LLVM IR to stdout\n"
-						 "  --llvm-out <file>      Write LLVM IR to file\n\n"
-						 "Link options:\n"
+						 "  --llvm-out <file>      Write LLVM IR to file";
+
+		constexpr auto link_options = "Link options:\n"
 						 "  -o <file>              Output executable/library file\n"
 						 "  -L <path>              Add library search path\n"
 						 "  -l <lib>               Link with library\n"
 						 "  -lib                   Create dynamic library\n"
-						 "  -statlib               Create static library (placeholder)\n";
+						 "  -statlib               Create static library (placeholder)";
+
+		void print_help() {
+			std::cout << "Usage: dinoc <command> [options]\n\n"
+						 "Commands:\n"
+						 "  compile <source.dino>  Compile source file to object file\n"
+						 "  link <obj1.o> ...      Link object files into executable or library\n"
+						 "  --help, -h             Show this help message\n\n"
+						 <<	compile_options << "\n\n"
+						 << link_options << std::endl;
+
 		}
 
 		ParsedCommand parse_compile_command(int argc, char** argv, int start_idx) {
@@ -71,6 +76,9 @@ namespace dino::cli {
 					options.dump_llvm_ir = true;
 				} else if (arg == "--llvm-out" && i + 1 < argc) {
 					options.llvm_output_file = argv[++i];
+				} else if (arg == "-h" || arg == "--help") {
+					std::cout << compile_options << std::endl;
+					std::exit(EXIT_SUCCESS);
 				} else {
 					result.error_message = "compile: unknown argument: " + arg;
 					return result;
@@ -104,6 +112,9 @@ namespace dino::cli {
 					options.is_static_library = true;
 				} else if (arg == "-lib") {
 					options.is_dynamic_library = true;
+				} else if (arg == "-h" || arg == "--help") {
+					std::cout << link_options << std::endl;
+					std::exit(EXIT_SUCCESS);
 				} else if (!arg.empty() && arg[0] != '-') {
 					options.object_files.emplace_back(arg);
 				} else {
@@ -150,10 +161,18 @@ namespace dino::cli {
 		}
 
 		if (command == "compile") {
+			if (argc > 2 && std::strcmp(argv[2], "-h") == 0 || std::strcmp(argv[2], "--help") == 0) {
+				std::cout << compile_options << std::endl;
+				std::exit(EXIT_SUCCESS);
+			}
 			return parse_compile_command(argc, argv, 2);
 		}
 
 		if (command == "link") {
+			if (argc > 2 && std::strcmp(argv[2], "-h") == 0 || std::strcmp(argv[2], "--help") == 0) {
+				std::cout << link_options << std::endl;
+				std::exit(EXIT_SUCCESS);
+			}
 			return parse_link_command(argc, argv, 2);
 		}
 
