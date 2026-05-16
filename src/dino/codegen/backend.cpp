@@ -3293,8 +3293,12 @@ namespace dino::codegen {
 
 			llvm::Value* emit_match_expression(const MatchExpr& expr) {
 				SemanticType result_type = infer_expr_type(&expr);
-				llvm::AllocaInst* slot = create_entry_alloca(current_function_, llvm_type(result_type), "match.expr");
-				builder_.CreateStore(zero_value(result_type), slot);
+				const bool is_void_result = result_type.is_void();
+				llvm::AllocaInst* slot = nullptr;
+				if (!is_void_result) {
+					slot = create_entry_alloca(current_function_, llvm_type(result_type), "match.expr");
+					builder_.CreateStore(zero_value(result_type), slot);
+				}
 
 				llvm::Value* subject = emit_expression(expr.subject.get());
 				SemanticType subject_type = infer_expr_type(expr.subject.get());
@@ -3347,6 +3351,9 @@ namespace dino::codegen {
 				}
 
 				builder_.SetInsertPoint(merge_block);
+				if (is_void_result) {
+					return llvm::UndefValue::get(llvm::Type::getVoidTy(context_));
+				}
 				return builder_.CreateLoad(llvm_type(result_type), slot, "match.result");
 			}
 
@@ -3357,7 +3364,7 @@ namespace dino::codegen {
 				if (const auto* expr = std::get_if<ExprPtr>(&branch)) {
 					llvm::Value* value = emit_expression(expr->get());
 					SemanticType actual_type = infer_expr_type(expr->get());
-					if (value != nullptr) {
+					if (value != nullptr && slot != nullptr) {
 						builder_.CreateStore(cast_value(value, actual_type, result_type, true), slot);
 					}
 					return;
@@ -4198,7 +4205,9 @@ namespace dino::codegen {
 				}
 				llvm::Value* value = emit_expression(yield_stmt.value.get());
 				SemanticType actual_type = infer_expr_type(yield_stmt.value.get());
-				builder_.CreateStore(cast_value(value, actual_type, current_yield_->type, true), current_yield_->slot);
+				if (current_yield_->slot != nullptr) {
+					builder_.CreateStore(cast_value(value, actual_type, current_yield_->type, true), current_yield_->slot);
+				}
 				emit_scope_cleanups_until(current_yield_->scope_depth);
 				builder_.CreateBr(current_yield_->merge_block);
 			}
